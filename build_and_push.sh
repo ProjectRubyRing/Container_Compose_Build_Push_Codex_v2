@@ -512,7 +512,8 @@ cleanup_local_images() {
   [ -n "${TARGET_IMAGE:-}" ] && images_to_remove+=("$TARGET_IMAGE")
 
   log "--- 削除対象ローカルイメージ ---"
-  local img removed_count=0
+  local img
+  local removed_count=0
   for img in "${images_to_remove[@]}"; do
     if [ "$DRY_RUN" = "true" ]; then
       log "[DRY-RUN] docker image rm --force ${img}"
@@ -539,7 +540,7 @@ cleanup_local_images() {
   if [ "$DRY_RUN" = "true" ]; then
     log "[DRY-RUN] docker builder prune --force"
   else
-    if docker builder prune --force 2>&1; then
+    if docker builder prune --force; then
       log "ビルドキャッシュを削除しました。"
     else
       warn "ビルドキャッシュの削除に失敗しました (docker builder prune --force)。手動で実行してください。"
