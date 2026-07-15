@@ -52,6 +52,7 @@ ECR_USERNAME="AWS"                # ECR ログイン時の固定ユーザー名
 DRY_RUN="false"                   # true: 実際の変更は行わず、実行内容のプレビューのみ表示
 LOG_DIR=""                        # 指定時: コンソール出力をこのディレクトリのログファイルにも保存する
 LOG_FILE=""                       # --log-dir 指定時に組み立てる実際のログファイルパス
+POST_CLEANUP="true"               # true: プッシュ後にローカルイメージ・ビルドキャッシュを削除してディスク使用状況を表示する
 
 # ビルドのみを実行する処理は build_and_verify.sh に切り出した。
 # --build-only 指定時はこのスクリプト冒頭で build_and_verify.sh に委譲する。
@@ -130,6 +131,8 @@ Options:
                            - --build-only 委譲時も、委譲先の出力を含めて記録する
   --dry-run                実際のビルド/ログイン/タグ付け/プッシュ/ファイル出力は
                            行わず、実行される内容のプレビューのみ表示する
+  --skip-post-cleanup      プッシュ後のローカルイメージ削除・ビルドキャッシュ削除・
+                           ディスク使用状況の表示をスキップする (既定: 実行する)
   --build-only             ビルドのみを実行する (処理は build_and_verify.sh に委譲)。
                            ECR 権限チェック/ログイン/タグ付け/プッシュ/imagedefinition の
                            出力は行わない。--copy-file が指定されている場合は、ビルド前に
@@ -252,6 +255,7 @@ while [ $# -gt 0 ]; do
     --output)           OUTPUT_FILE="$2"; shift 2 ;;
     --log-dir)          LOG_DIR="$2"; shift 2 ;;  # 冒頭でログ複製を設定済み (値の再取得のみ)
     --dry-run)          DRY_RUN="true"; shift ;;
+    --skip-post-cleanup) POST_CLEANUP="false"; shift ;;
     --build-only)       shift ;;  # 冒頭で build_and_verify.sh に委譲済み (ここには到達しない)
     --copy-file)        COPY_SPECS+=("$2"); shift 2 ;;
     --jboss-password-param) JBOSS_PASSWORD_PARAM="$2"; shift 2 ;;
@@ -480,6 +484,80 @@ cleanup_copied_files() {
 # ビルド成功・失敗いずれの経路 (途中の exit を含む) でも確実に削除する。
 # 併せて処理実行時間 (経過秒数) を末尾に記録する (冒頭の暫定トラップを差し替える)。
 trap 'cleanup_copied_files; log_elapsed' EXIT
+
+# ---- プッシュ後ディスク確認・ローカルイメージクリーンアップ ------------------
+# プッシュ完了後にローカルイメージとビルドキャッシュを削除し、
+# 削除した内容とディスク使用量の変化を表示する。
+# --skip-post-cleanup 指定時はこの関数ごとスキップされる。
+cleanup_local_images() {
+  [ "$POST_CLEANUP" = "true" ] || return 0
+
+  log "========================================================"
+  log "プッシュ後クリーンアップ: ディスク使用状況を確認します"
+  log "========================================================"
+
+  # ---- クリーンアップ前のディスク使用状況 ------------------------------------
+  log "--- クリーンアップ前のディスク使用状況 (docker system df) ---"
+  if [ "$DRY_RUN" = "true" ]; then
+    log "[DRY-RUN] docker system df"
+  else
+    docker system df || warn "docker system df の実行に失敗しました"
+  fi
+
+  # ---- 削除対象イメージの一覧とサイズ ----------------------------------------
+  local images_to_remove=()
+  # LOCAL_IMAGE / TARGET_IMAGE は変数が確定している場合のみ追加する。
+  # (この関数は imagedefinition 出力後に呼ばれるため、両変数は確定済み)
+  [ -n "${LOCAL_IMAGE:-}" ]  && images_to_remove+=("$LOCAL_IMAGE")
+  [ -n "${TARGET_IMAGE:-}" ] && images_to_remove+=("$TARGET_IMAGE")
+
+  log "--- 削除対象ローカルイメージ ---"
+  local img removed_count=0
+  for img in "${images_to_remove[@]}"; do
+    if [ "$DRY_RUN" = "true" ]; then
+      log "[DRY-RUN] docker image rm --force ${img}"
+    elif docker image inspect "$img" >/dev/null 2>&1; then
+      local img_size
+      img_size="$(docker image inspect "$img" \
+          --format '{{.Size}}' 2>/dev/null || printf '0')"
+      # バイト→MB 換算 (bash 整数演算)
+      local img_mb=$(( img_size / 1024 / 1024 ))
+      log "削除します: ${img}  (約 ${img_mb} MB / ${img_size} bytes)"
+      if docker image rm --force "$img" >/dev/null 2>&1; then
+        log "  -> 削除完了: ${img}"
+        removed_count=$(( removed_count + 1 ))
+      else
+        warn "  -> 削除に失敗しました: ${img} (他のタグで参照中の可能性があります)"
+      fi
+    else
+      log "スキップ (イメージが存在しません): ${img}"
+    fi
+  done
+
+  # ---- ビルドキャッシュの削除 ------------------------------------------------
+  log "--- ビルドキャッシュのクリーンアップ (docker builder prune --force) ---"
+  if [ "$DRY_RUN" = "true" ]; then
+    log "[DRY-RUN] docker builder prune --force"
+  else
+    if docker builder prune --force 2>&1; then
+      log "ビルドキャッシュを削除しました。"
+    else
+      warn "ビルドキャッシュの削除に失敗しました (docker builder prune --force)。手動で実行してください。"
+    fi
+  fi
+
+  # ---- クリーンアップ後のディスク使用状況 ------------------------------------
+  log "--- クリーンアップ後のディスク使用状況 (docker system df) ---"
+  if [ "$DRY_RUN" = "true" ]; then
+    log "[DRY-RUN] docker system df"
+  else
+    docker system df || warn "docker system df の実行に失敗しました"
+  fi
+
+  log "========================================================"
+  log "プッシュ後クリーンアップ完了: ローカルイメージ ${removed_count} 件を削除しました"
+  log "========================================================"
+}
 
 # ---- docker push 失敗時の原因診断 / 調査ガイド ------------------------------
 # 各原因カテゴリごとの詳細な説明・AWS CLI 調査コマンド・AWS コンソール確認箇所を出力する。
@@ -817,6 +895,10 @@ fi
 
 log "  name     = ${CONTAINER_NAME}"
 log "  imageUri = ${TARGET_IMAGE}"
+
+# ---- プッシュ後ローカルクリーンアップ ----------------------------------------
+cleanup_local_images
+
 if [ "$DRY_RUN" = "true" ]; then
   log "DRY-RUN が完了しました (実際の変更は行われていません)。"
 else
