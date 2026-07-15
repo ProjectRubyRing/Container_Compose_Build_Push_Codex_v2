@@ -58,7 +58,7 @@
 | `--local-image NAME` | ビルドで生成されるローカルイメージ名 | `j1/base.local` |
 | `--container-name NAME` | `imagedefinition.json` の name | `--repository` の値 |
 | `--compose-file FILE` | compose ファイル (**compose 版のみ**) | `compose.yml` |
-| `--compose-service NAME` | ビルド対象サービス名 (未指定なら全サービス) (**compose 版のみ**) | (全サービス) |
+| `--compose-service NAME` | ビルド対象サービス名 (未指定なら全サービス) (**compose 版のみ**)。`build_and_verify.sh` / `--build-only` では繰り返し指定またはカンマ区切りで複数指定できる。複数指定時は `base` を先行ビルドする | (全サービス) |
 | `--no-cache` | キャッシュを破棄してビルドする | `false` |
 | `--output FILE` | imagedefinition の出力先 | `imagedefinition.json` |
 | `--dry-run` | 実際のビルド/ログイン/タグ付け/プッシュ/ファイル出力は行わず、実行内容のプレビューのみ表示する | `false` |
@@ -171,6 +171,42 @@ CI でもそのまま利用できます。compose 版 (`build_and_push.sh`) / bu
 ./build_and_verify.sh --dry-run
 ```
 
+### 複数 Compose サービスのビルド・起動
+
+`--compose-service` は繰り返し指定とカンマ区切りの両方に対応しています。複数の
+サービスを指定すると、ベースイメージを提供する **`base` サービスを必ず最初に
+単独でビルド**し、`--local-image` のイメージが生成されたことを確認してから、
+残りのサービスを 1 回の `docker compose build` にまとめて並列ビルドします。
+Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
+`docker-compose build --parallel` を使用して並列実行を明示します。
+
+```bash
+# 繰り返し指定
+./build_and_verify.sh \
+    --compose-service app \
+    --compose-service batch \
+    --compose-service db
+
+# カンマ区切り (上と同じ)
+./build_and_verify.sh --compose-service app,batch,db
+```
+
+上の例で実行されるビルド順は次のとおりです。
+
+```text
+1. docker compose --parallel 3 -f compose.yml build base
+2. docker compose --parallel 3 -f compose.yml build app batch db
+```
+
+- `base` が `--compose-service` に含まれている場合も、第2フェーズでは除外されるため
+  二重にはビルドしません。
+- `base` が指定に含まれていない場合はビルドの前提として暗黙に先行ビルドしますが、
+  **起動対象には追加しません**。
+- 起動確認またはURL確認を有効にした場合、指定サービスは1回の
+  `docker compose up -d --no-build` にまとめて同時に起動します。
+- 1サービスだけを指定した場合と、`--compose-service` を省略した場合は、従来どおり
+  1回の `docker compose build` を実行します。
+
 ### 起動確認 (`--verify-startup`)
 
 ビルドしたイメージをコンテナとして起動し、**jbosseap (WildFly/JBoss EAP)
@@ -180,6 +216,11 @@ CI でもそのまま利用できます。compose 版 (`build_and_push.sh`) / bu
 - 起動完了とみなすログのパターンは既定で JBoss EAP / WildFly の起動完了メッセージ
   (`WFLYSRV0025` / `WFLYSRV0026` = `started in ...`) です。別の起動メッセージを
   使う場合は `--startup-log-pattern` (拡張正規表現) で上書きできます。
+- `--startup-service NAME` で **JBoss EAP の起動確認を行う Compose サービス**を
+  指定できます。繰り返し指定またはカンマ区切りで複数指定でき、指定した全サービスの
+  ログを個別に確認します。このオプションだけでも `--verify-startup` が暗黙に有効に
+  なります。`--compose-service` と併用する場合は、その起動対象に含まれるサービスを
+  指定してください。
 - `--startup-timeout` (既定 120 秒) 以内に起動完了ログを検出できない場合、または
   コンテナが起動途中で停止した場合は、コンテナログの末尾を表示して失敗終了します。
 
@@ -190,6 +231,14 @@ CI でもそのまま利用できます。compose 版 (`build_and_push.sh`) / bu
 # 起動ログのパターン・待機時間を指定
 ./build_and_verify.sh --verify-startup \
     --startup-log-pattern 'WFLYSRV0025' --startup-timeout 180
+
+# app / batch / db をまとめてビルド・起動し、JBoss EAP の app だけを確認
+./build_and_verify.sh --compose-service app,batch,db \
+    --startup-service app
+
+# app と batch の両方で JBoss EAP の起動完了を個別に確認
+./build_and_verify.sh --compose-service app,batch,db \
+    --startup-service app --startup-service batch
 ```
 
 ### URL 応答確認 (`--verify-url`)
