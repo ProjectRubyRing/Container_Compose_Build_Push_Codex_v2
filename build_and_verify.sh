@@ -191,7 +191,7 @@ URL 応答確認:
                            Content-Type 未指定時は application/json を自動設定する。
   --url-body-form DATA     verify-url 時のリクエストボディに form データ
                            (key=value&...) を設定する。Content-Type 未指定時は
-                           application/x-www-form-urlencoded を自動設定する
+                           application/x-www-form-urlencoded を自動設定する。
   --url-timeout SEC        期待する応答を得るまで待つ最大秒数・リトライ (既定: 60)
   --url-interval SEC       URL 呼び出しのリトライ間隔・秒 (既定: 3)
   --url-insecure           TLS 証明書検証を無効化して呼び出す (curl -k)
@@ -274,7 +274,11 @@ if [ -n "$URL_BODY_JSON" ] && [ -n "$URL_BODY_FORM" ]; then
 fi
 
 # verify-url 用の追加指定は --verify-url と組み合わせて使う。
-if [ -z "$VERIFY_URL" ] && { [ -n "$URL_CONTENT_TYPE" ] || [ -n "$URL_BODY_JSON" ] || [ -n "$URL_BODY_FORM" ]; }; then
+HAS_URL_REQUEST_OPTIONS="false"
+if [ -n "$URL_CONTENT_TYPE" ] || [ -n "$URL_BODY_JSON" ] || [ -n "$URL_BODY_FORM" ]; then
+  HAS_URL_REQUEST_OPTIONS="true"
+fi
+if [ -z "$VERIFY_URL" ] && [ "$HAS_URL_REQUEST_OPTIONS" = "true" ]; then
   err "--url-content-type / --url-body-json / --url-body-form は --verify-url と併用してください"
   exit 2
 fi
