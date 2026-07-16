@@ -96,7 +96,9 @@ DATASOURCE_SUCCESS_LOG_PATTERN='WFLYJCA0001'
 DATASOURCE_ERROR_TARGET_PATTERN='datasource|data source|java:/|jboss\.naming\.context\.java\.'
 DATASOURCE_ERROR_CODE_PATTERN='WFLYCTL0013|WFLYCTL0080|IJ[0-9]{6}|WFLYJCA[0-9]{4}'
 DATASOURCE_ERROR_DETAIL_PATTERN='warning|warn|error|failed|failure|exception|unable|missing|unavailable|not installed'
-DATASOURCE_ERROR_MATCH_PATTERN="${DATASOURCE_ERROR_TARGET_PATTERN}.*(${DATASOURCE_ERROR_DETAIL_PATTERN})|(${DATASOURCE_ERROR_CODE_PATTERN}).*${DATASOURCE_ERROR_TARGET_PATTERN}|WFLYJCA[0-9]{4}.*(${DATASOURCE_ERROR_DETAIL_PATTERN})"
+DATASOURCE_ERROR_TARGET_WITH_DETAIL_PATTERN="${DATASOURCE_ERROR_TARGET_PATTERN}.*(${DATASOURCE_ERROR_DETAIL_PATTERN})"
+DATASOURCE_ERROR_CODE_WITH_TARGET_PATTERN="(${DATASOURCE_ERROR_CODE_PATTERN}).*${DATASOURCE_ERROR_TARGET_PATTERN}"
+DATASOURCE_ERROR_WFLYJCA_WITH_DETAIL_PATTERN="WFLYJCA[0-9]{4}.*(${DATASOURCE_ERROR_DETAIL_PATTERN})"
 
 # ---- URL 応答確認 関連 ------------------------------------------------------
 VERIFY_URL=""                     # 空でなければ起動確認後にこの URL を呼び出して確認
@@ -573,8 +575,7 @@ show_datasource_diagnostics_from_logs() {
   ds_names="$(printf '%s\n' "$logs" | grep -E "$DATASOURCE_SUCCESS_LOG_PATTERN" | grep -Eo '\[java:[^]]+\]' | tr -d '[]' | sort -u || true)"
   ds_errors="$(
     printf '%s\n' "$logs" \
-      | grep -Ei "$DATASOURCE_ERROR_TARGET_PATTERN|$DATASOURCE_ERROR_CODE_PATTERN" \
-      | grep -Ei "$DATASOURCE_ERROR_MATCH_PATTERN" \
+      | grep -Ei "$DATASOURCE_ERROR_TARGET_WITH_DETAIL_PATTERN|$DATASOURCE_ERROR_CODE_WITH_TARGET_PATTERN|$DATASOURCE_ERROR_WFLYJCA_WITH_DETAIL_PATTERN" \
       | tail -n "$DEPLOY_LOG_LINES" || true
   )"
   diag "───────────────────────────────────────────────────────────────────"
