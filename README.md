@@ -65,6 +65,8 @@
 | `--log-dir DIR` | コンソールに出力されるログを `DIR` 配下のログファイルにも保存する。画面表示は従来どおり継続し、ログ末尾には処理実行時間 (経過秒数) も記録される。`DIR` が無ければ自動作成する。ファイル名は compose 版が `build_and_push_<YYYYMMDDHHMMSS>.log`、buildx 版が `buildx_build_and_push_<YYYYMMDDHHMMSS>.log`。compose 版で `--build-only` 委譲時も、委譲先 (`build_and_verify.sh`) の出力を含めて記録する | (なし。指定時のみログファイル出力) |
 | `--build-only` | ビルドのみを実行する (**compose 版のみ**。処理は `build_and_verify.sh` に委譲)。ECR 権限チェック/ログイン/タグ付け/プッシュ/`imagedefinition.json` の出力は行わない。`--copy-file` 指定時は事前コピー → ビルド → 自動削除を行う。`--verify-startup` / `--verify-url` 等の追加オプションも委譲される (後述) | `false` |
 | `--copy-file SRC:DEST_DIR` | ビルド前に `SRC` を `DEST_DIR` へコピーし、ビルド終了後に自動削除する。繰り返し指定で複数ファイルに対応 | (なし) |
+| `--env-list-limit N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後に表示する環境変数一覧の件数。各対象コンテナごとに先頭 `N` 件を表示し、既定は `all` | `all` |
+| `--env-list-file FILE` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後の環境変数一覧を `FILE` にも出力する。画面表示も継続 | (なし) |
 | `--jboss-password-param NAME` | JBoss のマスターパスワードを AWS パラメータストア (SSM Parameter Store) の指定キー `NAME` から取得し、環境変数経由の BuildKit シークレットとしてビルドに注入する (後述) | (なし) |
 | `--jboss-password VALUE` | JBoss のマスターパスワードを直接指定する (パラメータストアから取得しない場合)。`--jboss-password-param` とは同時指定不可 | (なし) |
 | `--jboss-password-env NAME` | シークレットの受け渡しに使う環境変数名。このオプションのみを指定した場合は、事前に export 済みの環境変数の値をそのまま使う | `JBOSS_MASTER_PASSWORD` |
@@ -230,6 +232,12 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 - 起動確認時はアプリケーションのデプロイ関連ログも表示します。
   正常デプロイ時はデプロイパスを含むログ、エラー時はエラー内容を含むログを表示します。
   表示行数は `--deploy-log-lines` で指定でき、既定は最新 20 行です。
+- 動作確認が成功した場合は、**対象コンテナで参照可能な環境変数一覧**も表示します。
+  種別は `compose.yml environment` / `build引数` / `コンテナ内部処理` /
+  `イメージ既定・その他` を出し分けます。
+- 環境変数一覧の表示件数は `--env-list-limit` で制御できます。既定は `all`
+  (全件表示) です。
+- `--env-list-file FILE` を指定すると、同じ一覧をファイルにも保存できます。
 
 ```bash
 # ビルド + jbosseap 起動確認
@@ -242,6 +250,11 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 # 起動重要ログ / デプロイログの表示行数を指定
 ./build_and_verify.sh --verify-startup \
     --startup-log-lines 30 --deploy-log-lines 40
+
+# 環境変数一覧を 10 件に制限し、ファイルにも保存
+./build_and_verify.sh --verify-startup \
+    --env-list-limit 10 \
+    --env-list-file ./logs/container_envs.txt
 
 # app / batch / db をまとめてビルド・起動し、JBoss EAP の app だけを確認
 ./build_and_verify.sh --compose-service app,batch,db \

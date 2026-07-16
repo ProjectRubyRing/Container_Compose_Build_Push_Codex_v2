@@ -123,6 +123,12 @@ DEPLOY_LOG_LINES="20"             # デプロイ関連ログ出力行数
 DEPLOY_SUCCESS_LOG_PATTERN='WFLYSRV0010|WFLYSRV0027|WFLYDR0001|WFLYDS0010|deployed|deployment'
 DEPLOY_ERROR_LOG_PATTERN='WFLYCTL0013|WFLYCTL0080|WFLYSRV0026|deployment.*(failed|error|exception)|deployed.*with errors'
 
+# ---- 環境変数一覧出力 --------------------------------------------------------
+ENV_LIST_LIMIT="all"              # all: 全件表示 / 数値: 各コンテナごとの最大表示件数
+ENV_LIST_FILE=""                  # 指定時は環境変数一覧をファイルにも出力
+BUILD_ARG_ENV_NAMES_LOADED="false"
+declare -A BUILD_ARG_ENV_NAME_SET=()
+
 # ---- ログ用ヘルパ -----------------------------------------------------------
 log()  { printf '[%s] %s\n'  "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 warn() { printf '[%s] [WARN] %s\n'  "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2; }
@@ -211,6 +217,11 @@ JBoss マスターパスワード (BuildKit シークレット):
   --startup-log-lines N    起動成功時に表示する重要ログの最新 N 行 (既定: 20)
   --deploy-log-lines N     デプロイ関連ログの最新 N 行 (既定: 20)
   --keep-container         確認後もコンテナを停止・削除せずに残す (調査用)
+  --env-list-limit N|all   動作確認成功時に表示する環境変数一覧の件数。
+                           各対象コンテナごとに先頭 N 件を表示する。
+                           既定: all (全件表示)
+  --env-list-file FILE     動作確認成功時の環境変数一覧を FILE にも出力する。
+                           画面表示は従来どおり継続する
 
 URL 応答確認:
   --verify-url URL         起動確認後、この URL へ HTTP リクエストを送り応答を確認する。
@@ -263,6 +274,8 @@ while [ $# -gt 0 ]; do
     --startup-log-lines)   STARTUP_IMPORTANT_LOG_LINES="$2"; shift 2 ;;
     --deploy-log-lines)    DEPLOY_LOG_LINES="$2"; shift 2 ;;
     --keep-container)      KEEP_CONTAINER="true"; shift ;;
+    --env-list-limit)      ENV_LIST_LIMIT="$2"; shift 2 ;;
+    --env-list-file)       ENV_LIST_FILE="$2"; shift 2 ;;
     --verify-url)          VERIFY_URL="$2"; shift 2 ;;
     --expect-status)       EXPECT_STATUS="$2"; shift 2 ;;
     --url-method)          URL_METHOD="$2"; shift 2 ;;
@@ -291,6 +304,9 @@ validate_positive_integer() {
 
 validate_positive_integer "$STARTUP_IMPORTANT_LOG_LINES" "--startup-log-lines" || exit 2
 validate_positive_integer "$DEPLOY_LOG_LINES" "--deploy-log-lines" || exit 2
+if [ "$ENV_LIST_LIMIT" != "all" ]; then
+  validate_positive_integer "$ENV_LIST_LIMIT" "--env-list-limit" || exit 2
+fi
 
 # --startup-service が --compose-service の対象に含まれているか検証する。
 # (--compose-service 未指定 = 全サービス対象なので、その場合は検証不要)
@@ -646,6 +662,290 @@ show_deploy_logs() {
   diag "───────────────────────────────────────────────────────────────────"
 }
 
+normalize_container_name() {
+  local name="$1"
+  printf '%s\n' "${name#/}"
+}
+
+compose_file_dir() {
+  local compose_dir
+  compose_dir="$(cd "$(dirname "$COMPOSE_FILE")" 2>/dev/null && pwd -P)" || return 1
+  printf '%s\n' "$compose_dir"
+}
+
+compose_dockerfiles() {
+  local compose_dir dockerfile_path cleaned found="false"
+  compose_dir="$(compose_file_dir)" || return 0
+  while IFS= read -r dockerfile_path; do
+    [ -n "$dockerfile_path" ] || continue
+    cleaned="${dockerfile_path#\"}"
+    cleaned="${cleaned%\"}"
+    cleaned="${cleaned#\'}"
+    cleaned="${cleaned%\'}"
+    if [ "${cleaned#/}" = "$cleaned" ]; then
+      cleaned="${compose_dir}/${cleaned}"
+    fi
+    printf '%s\n' "$cleaned"
+    found="true"
+  done < <(sed -n 's/^[[:space:]]*dockerfile:[[:space:]]*//p' "$COMPOSE_FILE")
+  if [ "$found" != "true" ] && [ -f "${compose_dir}/Dockerfile" ]; then
+    printf '%s\n' "${compose_dir}/Dockerfile"
+  fi
+}
+
+collect_build_arg_env_names_from_dockerfile() {
+  local dockerfile="$1"
+  [ -f "$dockerfile" ] || return 0
+  local physical_line logical_line="" trimmed env_body key value arg_name
+  local -a env_tokens=()
+  local -a arg_names=()
+  local -A arg_name_set=()
+  local -A env_name_set=()
+
+  while IFS= read -r physical_line || [ -n "$physical_line" ]; do
+    if [ -n "$logical_line" ]; then
+      logical_line="${logical_line}${physical_line}"
+    else
+      logical_line="$physical_line"
+    fi
+    if [[ "$logical_line" == *\\ ]]; then
+      logical_line="${logical_line%\\} "
+      continue
+    fi
+
+    trimmed="${logical_line#"${logical_line%%[![:space:]]*}"}"
+    logical_line=""
+    [ -n "$trimmed" ] || continue
+    case "$trimmed" in
+      \#*) continue ;;
+    esac
+
+    if [[ "$trimmed" =~ ^ARG[[:space:]]+([A-Za-z_][A-Za-z0-9_]*) ]]; then
+      arg_name="${BASH_REMATCH[1]}"
+      arg_name_set["$arg_name"]=1
+      continue
+    fi
+
+    if [[ "$trimmed" =~ ^ENV[[:space:]]+(.+)$ ]]; then
+      env_body="${BASH_REMATCH[1]}"
+      env_tokens=()
+      read -r -a env_tokens <<< "$env_body"
+      if [ ${#env_tokens[@]} -ge 2 ] && [[ "${env_tokens[0]}" != *=* ]]; then
+        key="${env_tokens[0]}"
+        value="${env_tokens[1]}"
+        for arg_name in "${!arg_name_set[@]}"; do
+          case "$value" in
+            *"\${${arg_name}}"*|*"\$${arg_name}"*)
+              env_name_set["$key"]=1
+              break
+            ;;
+          esac
+        done
+      fi
+      for value in "${env_tokens[@]}"; do
+        case "$value" in
+          *=*)
+            key="${value%%=*}"
+            value="${value#*=}"
+            for arg_name in "${!arg_name_set[@]}"; do
+              case "$value" in
+                *"\${${arg_name}}"*|*"\$${arg_name}"*)
+                  env_name_set["$key"]=1
+                  break
+                ;;
+              esac
+            done
+          ;;
+        esac
+      done
+    fi
+  done < "$dockerfile"
+
+  for key in "${!env_name_set[@]}"; do
+    printf '%s\n' "$key"
+  done | sort
+}
+
+load_build_arg_env_name_set() {
+  [ "$BUILD_ARG_ENV_NAMES_LOADED" = "true" ] && return 0
+  local dockerfile env_name
+  while IFS= read -r dockerfile; do
+    [ -f "$dockerfile" ] || continue
+    while IFS= read -r env_name; do
+      [ -n "$env_name" ] || continue
+      BUILD_ARG_ENV_NAME_SET["$env_name"]=1
+    done < <(collect_build_arg_env_names_from_dockerfile "$dockerfile")
+  done < <(compose_dockerfiles)
+  BUILD_ARG_ENV_NAMES_LOADED="true"
+}
+
+collect_container_pid1_env() {
+  local cid="$1"
+  if docker exec "$cid" /bin/sh -lc "tr '\\0' '\\n' </proc/1/environ" 2>/dev/null; then
+    return 0
+  fi
+  docker exec "$cid" env 2>/dev/null || true
+}
+
+collect_container_config_env() {
+  local cid="$1"
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cid" 2>/dev/null || true
+}
+
+collect_container_image_env() {
+  local cid="$1" image_id
+  image_id="$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)" || return 0
+  [ -n "$image_id" ] || return 0
+  docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$image_id" 2>/dev/null || true
+}
+
+append_env_names_by_type() {
+  local report_file="$1" type_label="$2"
+  shift 2
+  local -a names=("$@")
+  printf '[%s] %s 件\n' "$type_label" "${#names[@]}" >> "$report_file"
+  if [ ${#names[@]} -eq 0 ]; then
+    printf '  (なし)\n' >> "$report_file"
+    return 0
+  fi
+  printf '%s\n' "${names[@]}" | sed 's/^/  /' >> "$report_file"
+}
+
+append_container_env_report() {
+  local cid="$1" service_name="$2" container_name="$3" report_file="$4"
+  local line key value type_label shown_count total_count
+  local -a sorted_names=()
+  local -a compose_names=() build_arg_names=() internal_names=() other_names=()
+  declare -A process_env_values=()
+  declare -A container_env_values=()
+  declare -A image_env_values=()
+  declare -A compose_runtime_name_set=()
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key="${line%%=*}"
+    [ -n "$key" ] || continue
+    value=""
+    [ "$key" != "$line" ] && value="${line#*=}"
+    process_env_values["$key"]="$value"
+  done < <(collect_container_pid1_env "$cid")
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key="${line%%=*}"
+    [ -n "$key" ] || continue
+    value=""
+    [ "$key" != "$line" ] && value="${line#*=}"
+    container_env_values["$key"]="$value"
+  done < <(collect_container_config_env "$cid")
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key="${line%%=*}"
+    [ -n "$key" ] || continue
+    value=""
+    [ "$key" != "$line" ] && value="${line#*=}"
+    image_env_values["$key"]="$value"
+  done < <(collect_container_image_env "$cid")
+
+  for key in "${!container_env_values[@]}"; do
+    if [ -z "${image_env_values[$key]+_}" ] || [ "${container_env_values[$key]}" != "${image_env_values[$key]}" ]; then
+      compose_runtime_name_set["$key"]=1
+    fi
+  done
+
+  mapfile -t sorted_names < <(printf '%s\n' "${!process_env_values[@]}" | sort)
+  total_count="${#sorted_names[@]}"
+  shown_count="$total_count"
+  if [ "$ENV_LIST_LIMIT" != "all" ] && [ "$ENV_LIST_LIMIT" -lt "$shown_count" ]; then
+    shown_count="$ENV_LIST_LIMIT"
+  fi
+
+  printf '\n' >> "$report_file"
+  printf '───────────────────────────────────────────────────────────────────\n' >> "$report_file"
+  printf '環境変数一覧 (サービス: %s, コンテナ: %s, 表示件数: %s/%s)\n' "$service_name" "$container_name" "$shown_count" "$total_count" >> "$report_file"
+  printf '種別: compose.yml environment / build引数 / コンテナ内部処理 / イメージ既定・その他\n' >> "$report_file"
+  printf '───────────────────────────────────────────────────────────────────\n' >> "$report_file"
+
+  shown_count=0
+  for key in "${sorted_names[@]}"; do
+    if [ "$ENV_LIST_LIMIT" != "all" ] && [ "$shown_count" -ge "$ENV_LIST_LIMIT" ]; then
+      break
+    fi
+    if [ -z "${container_env_values[$key]+_}" ]; then
+      internal_names+=("$key")
+    elif [ -n "${compose_runtime_name_set[$key]+_}" ]; then
+      compose_names+=("$key")
+    elif [ -n "${BUILD_ARG_ENV_NAME_SET[$key]+_}" ]; then
+      build_arg_names+=("$key")
+    else
+      other_names+=("$key")
+    fi
+    shown_count=$((shown_count + 1))
+  done
+
+  append_env_names_by_type "$report_file" "compose.yml environment" "${compose_names[@]}"
+  append_env_names_by_type "$report_file" "build引数" "${build_arg_names[@]}"
+  append_env_names_by_type "$report_file" "コンテナ内部処理" "${internal_names[@]}"
+  append_env_names_by_type "$report_file" "イメージ既定・その他" "${other_names[@]}"
+}
+
+show_verified_container_envs() {
+  [ "$DRY_RUN" = "true" ] && {
+    log "[DRY-RUN] 動作確認成功後の環境変数一覧出力をプレビューします。"
+    return 0
+  }
+
+  local report_file cid service_name container_name env_report_tmp
+  local -a target_services=()
+  local -a target_container_ids=()
+
+  if [ ${#STARTUP_SERVICES[@]} -gt 0 ]; then
+    target_services=("${STARTUP_SERVICES[@]}")
+  elif [ ${#COMPOSE_SERVICES[@]} -gt 0 ]; then
+    target_services=("${COMPOSE_SERVICES[@]}")
+  fi
+
+  if [ ${#target_services[@]} -gt 0 ]; then
+    mapfile -t target_container_ids < <(compose_container_ids "${target_services[@]}")
+  else
+    mapfile -t target_container_ids < <(compose_container_ids)
+  fi
+
+  if [ ${#target_container_ids[@]} -eq 0 ]; then
+    warn "環境変数一覧を出力できませんでした。対象コンテナが見つかりません。"
+    return 0
+  fi
+
+  load_build_arg_env_name_set
+  env_report_tmp="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/env_report.$$")"
+  : > "$env_report_tmp"
+
+  for cid in "${target_container_ids[@]}"; do
+    [ -n "$cid" ] || continue
+    service_name="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cid" 2>/dev/null || true)"
+    [ -n "$service_name" ] || service_name="(unknown)"
+    container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || printf '%s' "$cid")")"
+    append_container_env_report "$cid" "$service_name" "$container_name" "$env_report_tmp"
+  done
+
+  diag ""
+  while IFS= read -r report_file; do
+    diag "$report_file"
+  done < "$env_report_tmp"
+
+  if [ -n "$ENV_LIST_FILE" ]; then
+    mkdir -p "$(dirname "$ENV_LIST_FILE")" 2>/dev/null || true
+    if cp "$env_report_tmp" "$ENV_LIST_FILE" 2>/dev/null; then
+      log "環境変数一覧をファイルへ出力しました: $ENV_LIST_FILE"
+    else
+      warn "環境変数一覧のファイル出力に失敗しました: $ENV_LIST_FILE"
+    fi
+  fi
+
+  rm -f "$env_report_tmp"
+}
+
 # 対象コンテナがすべて実行中か確認する (途中停止 = 起動失敗の早期検知用)。
 # 停止しているコンテナがあれば 1 を返す。
 containers_all_running() {
@@ -935,6 +1235,9 @@ fi
 
 # ---- 起動確認が不要ならここで終了 -------------------------------------------
 if [ "$NEED_CONTAINER" != "true" ]; then
+  if [ "$ENV_LIST_LIMIT" != "all" ] || [ -n "$ENV_LIST_FILE" ]; then
+    warn "環境変数一覧はコンテナ起動を伴う動作確認時のみ出力されます。--verify-startup または --verify-url を併用してください。"
+  fi
   if [ "$DRY_RUN" = "true" ]; then
     log "[DRY-RUN] ビルドのみが完了しました (実際のビルドは行われていません)。"
   else
@@ -965,6 +1268,8 @@ if [ -n "$VERIFY_URL" ]; then
     exit 1
   fi
 fi
+
+show_verified_container_envs
 
 if [ "$DRY_RUN" = "true" ]; then
   log "DRY-RUN が完了しました (実際の変更は行われていません)。"
