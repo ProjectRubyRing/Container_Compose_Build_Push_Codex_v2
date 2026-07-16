@@ -85,9 +85,10 @@ STARTUP_TIMEOUT="120"             # 起動完了を待つ最大秒数
 STARTUP_INTERVAL="3"              # 起動確認ポーリング間隔 (秒)
 KEEP_CONTAINER="false"            # true: 確認後もコンテナを停止・削除せずに残す
 STARTUP_IMPORTANT_LOG_LINES="20"  # 起動成功時に表示する重要ログの行数
-# 起動完了 (WFLYSRV0025/0026, JBoss EAP started) とサーバー状態遷移
-# (WFLYCTL0183/0448) を重要ログとして表示する。
-STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV002[56]|WFLYCTL0183|WFLYCTL0448|JBoss EAP.*started in'
+# 起動完了 (WFLYSRV0025/0026, JBoss EAP started)、サーバー状態遷移
+# (WFLYCTL0183/0448)、および DB の JNDI データソースバインド成功
+# (WFLYJCA0001: Bound data source [...]) を重要ログとして表示する。
+STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV002[56]|WFLYCTL0183|WFLYCTL0448|JBoss EAP.*started in|WFLYJCA0001'
 
 # ---- URL 応答確認 関連 ------------------------------------------------------
 VERIFY_URL=""                     # 空でなければ起動確認後にこの URL を呼び出して確認
@@ -551,6 +552,16 @@ show_startup_highlight_logs() {
     printf '%s\n' "$selected" >&2
   else
     diag "重要ログに一致する行はありませんでした (pattern=/${STARTUP_IMPORTANT_LOG_PATTERN}/)。"
+  fi
+  # JNDI データソースバインド成功行 (WFLYJCA0001) からデータソース名を抽出して表示する。
+  local ds_names
+  ds_names="$(printf '%s\n' "$logs" | grep -E 'WFLYJCA0001' | grep -Eo '\[java:[^]]+\]' | tr -d '[]' | sort -u || true)"
+  diag "───────────────────────────────────────────────────────────────────"
+  if [ -n "$ds_names" ]; then
+    diag "利用可能な JNDI データソース:"
+    printf '%s\n' "$ds_names" | sed 's/^/  /' >&2
+  else
+    diag "利用可能な JNDI データソース: (ログから検出されませんでした)"
   fi
   diag "───────────────────────────────────────────────────────────────────"
 }
