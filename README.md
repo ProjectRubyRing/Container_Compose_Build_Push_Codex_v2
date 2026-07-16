@@ -11,8 +11,8 @@
 
 さらに、**ビルドのみを行う** (ECR へはプッシュしない) 専用スクリプトとして
 `build_and_verify.sh` を提供します。ビルドに加えて、コンテナを起動して
-**jbosseap (WildFly/JBoss EAP) サーバーの起動確認**や、**指定 URL への HTTP 応答確認**を
-任意で行えます。`build_and_push.sh --build-only` はこのスクリプトへ委譲されます
+**jbosseap (WildFly/JBoss EAP) サーバーの起動確認**や、**指定 URL への HTTP 応答確認**、
+**JNDI データソースの成功名 / 作成失敗 warning・error の表示**を任意で行えます。`build_and_push.sh --build-only` はこのスクリプトへ委譲されます
 (後述の「ビルドのみの実行 / 起動・URL 確認」を参照)。
 
 想定実行環境: RHEL 9.6 の EC2 インスタンス (bash / GNU coreutils / Docker CE)。
@@ -225,6 +225,8 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
   コンテナが起動途中で停止した場合は、コンテナログの末尾を表示して失敗終了します。
 - 起動確認が成功した場合も、重要な起動ログを表示します。表示行数は
   `--startup-log-lines` で指定でき、既定は最新 20 行です。
+- 起動確認ログには、`WFLYJCA0001` から抽出した **利用可能な JNDI データソース名**に加え、
+  JNDI データソース作成に失敗した場合の **warning / error 関連ログ** も表示されます。
 - 起動確認時はアプリケーションのデプロイ関連ログも表示します。
   正常デプロイ時はデプロイパスを含むログ、エラー時はエラー内容を含むログを表示します。
   表示行数は `--deploy-log-lines` で指定でき、既定は最新 20 行です。
