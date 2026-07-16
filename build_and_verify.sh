@@ -188,7 +188,7 @@ URL 応答確認:
   --url-method METHOD      HTTP メソッド (既定: GET)
   --url-content-type TYPE  verify-url 時の Content-Type ヘッダ値
   --url-body-json JSON     verify-url 時のリクエストボディに JSON を設定する。
-                           Content-Type 未指定時は application/json を自動設定する
+                           Content-Type 未指定時は application/json を自動設定する。
   --url-body-form DATA     verify-url 時のリクエストボディに form データ
                            (key=value&...) を設定する。Content-Type 未指定時は
                            application/x-www-form-urlencoded を自動設定する
@@ -269,7 +269,7 @@ fi
 
 # URL ボディ指定は JSON / form のどちらか一方のみ許可する。
 if [ -n "$URL_BODY_JSON" ] && [ -n "$URL_BODY_FORM" ]; then
-  err "--url-body-json と --url-body-form は同時に指定できません"
+  err "--url-body-json と --url-body-form は同時に指定できません (リクエストボディは一つのみ指定できます)"
   exit 2
 fi
 
