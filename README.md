@@ -223,6 +223,11 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
   指定してください。
 - `--startup-timeout` (既定 120 秒) 以内に起動完了ログを検出できない場合、または
   コンテナが起動途中で停止した場合は、コンテナログの末尾を表示して失敗終了します。
+- 起動確認が成功した場合も、重要な起動ログを表示します。表示行数は
+  `--startup-log-lines` で指定でき、既定は最新 20 行です。
+- 起動確認時はアプリケーションのデプロイ関連ログも表示します。
+  正常デプロイ時はデプロイパスを含むログ、エラー時はエラー内容を含むログを表示します。
+  表示行数は `--deploy-log-lines` で指定でき、既定は最新 20 行です。
 
 ```bash
 # ビルド + jbosseap 起動確認
@@ -231,6 +236,10 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 # 起動ログのパターン・待機時間を指定
 ./build_and_verify.sh --verify-startup \
     --startup-log-pattern 'WFLYSRV0025' --startup-timeout 180
+
+# 起動重要ログ / デプロイログの表示行数を指定
+./build_and_verify.sh --verify-startup \
+    --startup-log-lines 30 --deploy-log-lines 40
 
 # app / batch / db をまとめてビルド・起動し、JBoss EAP の app だけを確認
 ./build_and_verify.sh --compose-service app,batch,db \
