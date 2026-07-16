@@ -555,7 +555,7 @@ show_startup_highlight_logs() {
   fi
   # JNDI データソースバインド成功行 (WFLYJCA0001) からデータソース名を抽出して表示する。
   local ds_names
-  ds_names="$(printf '%s\n' "$logs" | grep -E 'WFLYJCA0001' | grep -Eo 'java:[^][:space:]]+' | sort -u || true)"
+  ds_names="$(printf '%s\n' "$logs" | grep -E 'WFLYJCA0001' | grep -Eo '\[java:[^]]+\]' | tr -d '[]' | sort -u || true)"
   diag "───────────────────────────────────────────────────────────────────"
   if [ -n "$ds_names" ]; then
     diag "利用可能な JNDI データソース:"
