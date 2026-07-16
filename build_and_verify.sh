@@ -85,6 +85,7 @@ STARTUP_TIMEOUT="120"             # 起動完了を待つ最大秒数
 STARTUP_INTERVAL="3"              # 起動確認ポーリング間隔 (秒)
 KEEP_CONTAINER="false"            # true: 確認後もコンテナを停止・削除せずに残す
 STARTUP_IMPORTANT_LOG_LINES="20"  # 起動成功時に表示する重要ログの行数
+# 起動確認パターンに加え、サーバー状態遷移 (WFLYCTL0183/0448) を重要ログとして表示する。
 STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV002[56]|WFLYCTL0183|WFLYCTL0448|JBoss EAP.*started in'
 
 # ---- URL 応答確認 関連 ------------------------------------------------------
@@ -259,14 +260,17 @@ done
 
 validate_positive_integer() {
   local value="$1" opt_name="$2"
-  if ! printf '%s' "$value" | grep -Eq '^[1-9][0-9]*$'; then
-    err "${opt_name} には 1 以上の整数を指定してください: ${value}"
-    exit 2
-  fi
+  case "$value" in
+    ''|*[!0-9]*|0)
+      err "${opt_name} には 1 以上の整数を指定してください: ${value}"
+      return 1
+    ;;
+  esac
+  return 0
 }
 
-validate_positive_integer "$STARTUP_IMPORTANT_LOG_LINES" "--startup-log-lines"
-validate_positive_integer "$DEPLOY_LOG_LINES" "--deploy-log-lines"
+validate_positive_integer "$STARTUP_IMPORTANT_LOG_LINES" "--startup-log-lines" || exit 2
+validate_positive_integer "$DEPLOY_LOG_LINES" "--deploy-log-lines" || exit 2
 
 # --startup-service が --compose-service の対象に含まれているか検証する。
 # (--compose-service 未指定 = 全サービス対象なので、その場合は検証不要)
@@ -560,7 +564,14 @@ show_deploy_logs() {
   fi
   success_logs="$(printf '%s\n' "$logs" | grep -Ei "$DEPLOY_SUCCESS_LOG_PATTERN" | tail -n "$DEPLOY_LOG_LINES" || true)"
   error_logs="$(printf '%s\n' "$logs" | grep -Ei "$DEPLOY_ERROR_LOG_PATTERN" | tail -n "$DEPLOY_LOG_LINES" || true)"
-  path_logs="$(printf '%s\n' "$success_logs" | grep -Eo '/(opt|deployments?)/[^[:space:]"]+|/[^[:space:]"]+\.(war|ear|jar|rar)' | tail -n "$DEPLOY_LOG_LINES" || true)"
+  # 既定で頻出する deployment 配下やアーカイブパスを抽出する。
+  path_logs="$(
+    {
+      printf '%s\n' "$success_logs" | grep -Eo '/opt/[^[:space:]"]+' || true
+      printf '%s\n' "$success_logs" | grep -Eo '/deployments?/[^[:space:]"]+' || true
+      printf '%s\n' "$success_logs" | grep -Eo '/[^[:space:]"]+\.(war|ear|jar|rar)' || true
+    } | sed '/^$/d' | tail -n "$DEPLOY_LOG_LINES"
+  )"
 
   diag ""
   diag "───────────────────────────────────────────────────────────────────"
