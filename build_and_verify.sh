@@ -88,16 +88,17 @@ STARTUP_TIMEOUT="120"             # 起動完了を待つ最大秒数
 STARTUP_INTERVAL="3"              # 起動確認ポーリング間隔 (秒)
 KEEP_CONTAINER="false"            # true: 確認後もコンテナを停止・削除せずに残す
 SUPPRESS_REMOVED_LOGS="false"     # true: compose down の Removed ログ等を抑制する
+SUPPRESS_STARTUP_LOGS="false"     # true: 起動確認 重要ログの表示を抑制する
 STARTUP_IMPORTANT_LOG_LINES="20"  # 起動成功時に表示する重要ログの行数
 # 起動完了 (WFLYSRV0025/0026, JBoss EAP started)、サーバー状態遷移
 # (WFLYCTL0183/0448)、および DB の JNDI データソースバインド成功
 # (WFLYJCA0001: Bound data source / WFLYJCA0002: Bound XA data source /
 #  WFLYJCA0003: Bound connection factory) を重要ログとして表示する。
-STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV002[56]|WFLYCTL0183|WFLYCTL0448|JBoss EAP.*started in|WFLYJCA000[123]'
+STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV002[56]|WFLYCTL0183|WFLYCTL0448|JBoss EAP.*started in|WFLYJCA000[123]|WFLYJCA0018|WFLYUT0006|WFLYDS0013|WFLYSRV0060|WFLYSRV0051'
 # WFLYJCA0001: Bound data source / WFLYJCA0002: Bound XA data source /
 # WFLYJCA0003: Bound connection factory
 # テキストパターンも追加し、メッセージコードが異なるバージョンにも対応する。
-DATASOURCE_SUCCESS_LOG_PATTERN='WFLYJCA000[123]|Bound data source|Bound XA data source|Bound connection factory'
+DATASOURCE_SUCCESS_LOG_PATTERN='WFLYJCA0001|WFLYJCA0002|WFLYJCA0003|Bound data source|Bound XA data source|Bound connection factory'
 DATASOURCE_ERROR_TARGET_PATTERN='datasource|data source|java:/|jboss\.naming\.context\.java\.'
 # WFLYJCA[0-9]{4} は DATASOURCE_ERROR_WFLYJCA_WITH_DETAIL_PATTERN で個別に扱うため
 # ここには含めない (含めると Bound data source 等の成功ログが誤って error と判定される)。
@@ -217,6 +218,7 @@ JBoss マスターパスワード (BuildKit シークレット):
   --startup-timeout SEC    起動完了を待つ最大秒数 (既定: 120)
   --startup-interval SEC   起動確認のポーリング間隔・秒 (既定: 3)
   --startup-log-lines N    起動成功時に表示する重要ログの最新 N 行 (既定: 20)
+  --suppress-startup-logs  起動確認 重要ログの表示を抑制する (起動判定は継続)
   --deploy-log-lines N     デプロイ関連ログの最新 N 行 (既定: 20)
   --keep-container         確認後もコンテナを停止・削除せずに残す (調査用)
   --suppress-removed-logs  compose down 実行時の "Container ... Removed" 等の
@@ -276,6 +278,7 @@ while [ $# -gt 0 ]; do
     --startup-timeout)     STARTUP_TIMEOUT="$2"; shift 2 ;;
     --startup-interval)    STARTUP_INTERVAL="$2"; shift 2 ;;
     --startup-log-lines)   STARTUP_IMPORTANT_LOG_LINES="$2"; shift 2 ;;
+    --suppress-startup-logs) SUPPRESS_STARTUP_LOGS="true"; shift ;;
     --deploy-log-lines)    DEPLOY_LOG_LINES="$2"; shift 2 ;;
     --keep-container)      KEEP_CONTAINER="true"; shift ;;
     --suppress-removed-logs) SUPPRESS_REMOVED_LOGS="true"; shift ;;
@@ -582,14 +585,18 @@ show_startup_highlight_logs() {
     logs="$(compose_logs)"
   fi
   selected="$(printf '%s\n' "$logs" | grep -E "$STARTUP_IMPORTANT_LOG_PATTERN" | tail -n "$STARTUP_IMPORTANT_LOG_LINES" || true)"
-  diag ""
-  diag "───────────────────────────────────────────────────────────────────"
-  diag "起動確認 重要ログ (${target_desc}, 最新 ${STARTUP_IMPORTANT_LOG_LINES} 行):"
-  diag "───────────────────────────────────────────────────────────────────"
-  if [ -n "$selected" ]; then
-    printf '%s\n' "$selected" >&2
+  if [ "$SUPPRESS_STARTUP_LOGS" = "true" ]; then
+    log "起動確認 重要ログの表示を抑制しました (--suppress-startup-logs)。"
   else
-    diag "重要ログに一致する行はありませんでした (pattern=/${STARTUP_IMPORTANT_LOG_PATTERN}/)。"
+    diag ""
+    diag "───────────────────────────────────────────────────────────────────"
+    diag "起動確認 重要ログ (${target_desc}, 最新 ${STARTUP_IMPORTANT_LOG_LINES} 行):"
+    diag "───────────────────────────────────────────────────────────────────"
+    if [ -n "$selected" ]; then
+      printf '%s\n' "$selected" >&2
+    else
+      diag "重要ログに一致する行はありませんでした (pattern=/${STARTUP_IMPORTANT_LOG_PATTERN}/)。"
+    fi
   fi
   show_datasource_diagnostics_from_logs "$logs"
 }
