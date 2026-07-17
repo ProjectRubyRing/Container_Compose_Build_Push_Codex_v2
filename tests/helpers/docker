@@ -11,6 +11,10 @@ fail() {
   exit 64
 }
 
+is_cleaned() {
+  [ -n "${FAKE_DOCKER_CLEANED:-}" ] && [ -f "$FAKE_DOCKER_CLEANED" ]
+}
+
 if [ "${1:-}" = "compose" ]; then
   shift
   subcommand=""
@@ -53,6 +57,94 @@ if [ "${1:-}" = "compose" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "context" ] && [ "${2:-}" = "show" ]; then
+  printf 'default\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "context" ] && [ "${2:-}" = "inspect" ]; then
+  printf 'unix:///var/run/docker.sock\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "system" ] && [ "${2:-}" = "df" ]; then
+  if is_cleaned; then
+    printf 'Images|0 B\n'
+    printf 'Containers|0 B\n'
+    printf 'Local Volumes|0 B\n'
+    printf 'Build Cache|0 B\n'
+  else
+    printf 'Images|2 GB\n'
+    printf 'Containers|100 MB\n'
+    printf 'Local Volumes|500 MB\n'
+    printf 'Build Cache|400 MB\n'
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "system" ] && [ "${2:-}" = "prune" ]; then
+  if [ -n "${FAKE_DOCKER_CLEANED:-}" ]; then
+    : > "$FAKE_DOCKER_CLEANED"
+  fi
+  printf 'Total reclaimed space: 0B\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "info" ]; then
+  # ホスト側 df の値は環境依存になるため、Docker 管理対象容量だけをテストする。
+  exit 65
+fi
+
+if [ "${1:-}" = "container" ]; then
+  case "${2:-}" in
+    ls)
+      if ! is_cleaned; then
+        if [ "$*" = "container ls -q --filter status=paused" ]; then
+          printf 'cid-paused\n'
+        else
+          case "${3:-}" in
+            -q)  printf 'cid-running\ncid-paused\n' ;;
+            -aq) printf 'cid-running\ncid-paused\ncid-stopped\n' ;;
+            *) fail "$@" ;;
+          esac
+        fi
+      fi
+      ;;
+    unpause)
+      shift 2
+      printf '%s\n' "$@"
+      ;;
+    stop)
+      shift 2
+      printf '%s\n' "$@"
+      ;;
+    prune)
+      printf 'Total reclaimed space: 100MB\n'
+      ;;
+    *)
+      fail "$@"
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "builder" ] && [ "${2:-}" = "prune" ]; then
+  printf 'Total: 400MB\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "ls" ]; then
+  if ! is_cleaned; then
+    printf 'sha256:image-one\nsha256:image-two\n'
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "prune" ]; then
+  printf 'Total reclaimed space: 2GB\n'
+  exit 0
+fi
+
 if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
   case "$*" in
     *".Config.Env"*)
@@ -62,6 +154,30 @@ if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
       printf 'sha256:test-image|2026-07-18T00:00:00Z|12345\n'
       ;;
   esac
+  exit 0
+fi
+
+if [ "${1:-}" = "volume" ] && [ "${2:-}" = "ls" ]; then
+  if ! is_cleaned; then
+    printf 'volume-one\nvolume-two\n'
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "volume" ] && [ "${2:-}" = "prune" ]; then
+  printf 'Total reclaimed space: 500MB\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "network" ] && [ "${2:-}" = "ls" ]; then
+  if ! is_cleaned; then
+    printf 'network-one\n'
+  fi
+  exit 0
+fi
+
+if [ "${1:-}" = "network" ] && [ "${2:-}" = "prune" ]; then
+  printf 'Deleted Networks:\nnetwork-one\n'
   exit 0
 fi
 

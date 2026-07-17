@@ -62,6 +62,7 @@
 | `--no-cache` | キャッシュを破棄してビルドする | `false` |
 | `--output FILE` | imagedefinition の出力先 | `imagedefinition.json` |
 | `--dry-run` | 実際のビルド/ログイン/タグ付け/プッシュ/ファイル出力は行わず、実行内容のプレビューのみ表示する | `false` |
+| `--cleanup-all-docker-data` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。処理終了時に確認ダイアログを表示し、承認後、現在の Docker context の全コンテナ・全イメージ・全ローカルボリューム・未使用ネットワーク・現在の daemon で削除可能な全ビルドキャッシュを削除する | `false` |
 | `--log-dir DIR` | コンソールに出力されるログを `DIR` 配下のログファイルにも保存する。画面表示は従来どおり継続し、ログ末尾には処理実行時間 (経過秒数) も記録される。`DIR` が無ければ自動作成する。ファイル名は compose 版が `build_and_push_<YYYYMMDDHHMMSS>.log`、buildx 版が `buildx_build_and_push_<YYYYMMDDHHMMSS>.log`。compose 版で `--build-only` 委譲時も、委譲先 (`build_and_verify.sh`) の出力を含めて記録する | (なし。指定時のみログファイル出力) |
 | `--build-only` | ビルドのみを実行する (**compose 版のみ**。処理は `build_and_verify.sh` に委譲)。ECR 権限チェック/ログイン/タグ付け/プッシュ/`imagedefinition.json` の出力は行わない。`--copy-file` 指定時は事前コピー → ビルド → 自動削除を行う。`--verify-startup` / `--verify-url` 等の追加オプションも委譲される (後述) | `false` |
 | `--copy-file SRC:DEST_DIR` | ビルド前に `SRC` を `DEST_DIR` へコピーし、ビルド終了後に自動削除する。繰り返し指定で複数ファイルに対応 | (なし) |
@@ -176,6 +177,47 @@ CI でもそのまま利用できます。compose 版 (`build_and_push.sh`) / bu
 # 何が実行されるかだけ確認 (ビルドも行わない)
 ./build_and_verify.sh --dry-run
 ```
+
+### 終了時の Docker 完全クリーンアップ
+
+`--cleanup-all-docker-data` を指定すると、ビルド・動作確認の終了時に、現在の
+Docker context を対象とした確認ダイアログを表示します。これはディスク容量を
+確実に空けたい一時的なビルド環境向けの、明示的な破壊オプションです。
+
+```bash
+./build_and_verify.sh --cleanup-all-docker-data
+
+# build_and_push.sh の build-only 委譲でも利用可能
+./build_and_push.sh --build-only --cleanup-all-docker-data
+```
+
+確認画面には Docker context、Docker 管理対象の使用量、コンテナ・イメージ・
+ボリュームの件数と、次の処理対象を表示します。
+
+1. Compose プロジェクトを含む、実行中の全 Docker コンテナ (一時停止中の
+   コンテナは解除) を通常の `docker stop` で停止
+2. 停止済みを含む全コンテナ
+3. 全ローカルイメージとタグ
+4. 全ローカルボリュームと、その中の永続データ
+5. 未使用のユーザー定義ネットワーク
+6. 現在の Docker daemon で削除可能な全ビルドキャッシュ
+
+削除を開始するには、表示されたプロンプトへ
+`DELETE ALL DOCKER DATA` と正確に入力する必要があります。入力できない場合や
+一致しない場合は、通常の `build_and_verify.sh` の後始末以外の Docker 全体
+クリーンアップを行わず、終了コード `1` で終了します。処理後は
+`docker system df` の削除前後を比較した **Docker 管理対象の概算削減容量**を表示し、
+Docker data root のファイルシステムを参照できる場合は、ホスト側の空き容量増加も
+併記します。
+
+- 同じ Docker daemon を使う他プロジェクトのデータも対象になり、元に戻せません。
+- Docker daemon / Docker Desktop 自体、標準ネットワーク、Docker context、
+  レジストリ認証情報、daemon 設定は停止・削除しません。
+- `--keep-container` とは同時に指定できません。
+- `--dry-run` との併用時は、対象と予定コマンドだけを表示し、確認入力も削除も
+  行いません。
+- ビルドまたは動作確認が失敗した場合も、実処理開始後であれば終了時に同じ確認を
+  行います。元の処理が失敗していた場合、その終了コードを優先します。
 
 ### 複数 Compose サービスのビルド・起動
 
