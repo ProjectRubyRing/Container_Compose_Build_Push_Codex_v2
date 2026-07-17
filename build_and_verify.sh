@@ -992,11 +992,13 @@ teardown_container() {
     return 0
   fi
   log "コンテナを停止・削除します (compose down) ..."
+  local down_ok=0
   if [ "$SUPPRESS_REMOVED_LOGS" = "true" ] && [ "$DRY_RUN" != "true" ]; then
-    if ! "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" down > /dev/null 2>&1; then
-      warn "コンテナの停止・削除に失敗しました。手動で確認してください: ${COMPOSE_CMD[*]} -f $COMPOSE_FILE down"
-    fi
-  elif ! run "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" down; then
+    "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" down > /dev/null 2>&1 || down_ok=$?
+  else
+    run "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" down || down_ok=$?
+  fi
+  if [ "$down_ok" -ne 0 ]; then
     warn "コンテナの停止・削除に失敗しました。手動で確認してください: ${COMPOSE_CMD[*]} -f $COMPOSE_FILE down"
   fi
 }
