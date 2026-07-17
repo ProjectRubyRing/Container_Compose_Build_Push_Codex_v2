@@ -67,6 +67,11 @@ if [ "${1:-}" = "context" ] && [ "${2:-}" = "inspect" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "port" ] && [ "${2:-}" = "cid-app" ] && [ "${3:-}" = "8080/tcp" ]; then
+  printf '0.0.0.0:18080\n'
+  exit 0
+fi
+
 if [ "${1:-}" = "system" ] && [ "${2:-}" = "df" ]; then
   if is_cleaned; then
     printf 'Images|0 B\n'
@@ -191,6 +196,9 @@ if [ "${1:-}" = "inspect" ]; then
       ;;
     *"{{.Name}}"*)
       printf '/test-app-1\n'
+      ;;
+    *".NetworkSettings.Networks"*)
+      printf '172.20.0.2\n'
       ;;
     *"{{.Image}}"*)
       printf 'fake-image\n'

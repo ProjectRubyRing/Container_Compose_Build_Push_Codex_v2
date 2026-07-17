@@ -51,10 +51,12 @@ assert_before() {
 
 mkdir -p "$TEST_TMP/bin"
 cp "$TEST_DIR/helpers/docker" "$TEST_TMP/bin/docker"
-chmod 755 "$TEST_TMP/bin/docker"
+cp "$TEST_DIR/helpers/curl" "$TEST_TMP/bin/curl"
+chmod 755 "$TEST_TMP/bin/docker" "$TEST_TMP/bin/curl"
 
 export PATH="$TEST_TMP/bin:$PATH"
 export FAKE_DOCKER_CALLS="$TEST_TMP/docker.calls"
+export FAKE_CURL_CALLS="$TEST_TMP/curl.calls"
 
 success_output="$TEST_TMP/success.out"
 : > "$FAKE_DOCKER_CALLS"
@@ -180,6 +182,160 @@ assert_contains "$failure_output" "JNDI データソースエラー:"
 assert_contains "$failure_output" "WFLYJCA0031"
 assert_not_contains "$failure_output" "起動完了を確認しました"
 
+invalid_keep_mode_output="$TEST_TMP/keep-mode-invalid.out"
+if (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh --dry-run --keep-container-mode invalid
+) >"$invalid_keep_mode_output" 2>&1; then
+  cat "$invalid_keep_mode_output" >&2
+  fail "invalid keep-container mode unexpectedly returned zero"
+fi
+assert_contains "$invalid_keep_mode_output" "--keep-container-mode には bash または http を指定してください: invalid"
+
+invalid_http_port_output="$TEST_TMP/keep-mode-http-invalid-port.out"
+if (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --dry-run \
+    --keep-container-mode http \
+    --jboss-http-port 65536
+) >"$invalid_http_port_output" 2>&1; then
+  cat "$invalid_http_port_output" >&2
+  fail "invalid JBoss HTTP port unexpectedly returned zero"
+fi
+assert_contains "$invalid_http_port_output" "--jboss-http-port には 1 から 65535 の範囲を指定してください: 65536"
+
+bash_mode_output="$TEST_TMP/keep-mode-bash.out"
+: > "$FAKE_DOCKER_CALLS"
+export FAKE_COMPOSE_LOG_FILE="$TEST_DIR/fixtures/jboss-eap-8.1-success.log"
+if ! (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app \
+    --keep-container-mode bash \
+    --env-list-limit 1 \
+    --suppress-removed-logs
+) >"$bash_mode_output" 2>&1; then
+  cat "$bash_mode_output" >&2
+  fail "bash keep-container mode returned a non-zero status"
+fi
+
+assert_contains "$bash_mode_output" "検証対象コンテナの bash へ接続します"
+assert_contains "$bash_mode_output" "bash セッションを終了しました。コンテナは起動状態を維持します"
+assert_contains "$bash_mode_output" "コンテナを残します (--keep-container)"
+assert_contains "$FAKE_DOCKER_CALLS" "exec -it cid-app /bin/bash"
+assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+http_get_output="$TEST_TMP/keep-mode-http-get.out"
+: > "$FAKE_DOCKER_CALLS"
+: > "$FAKE_CURL_CALLS"
+export FAKE_CURL_STATUS="201"
+export FAKE_CURL_BODY='{"message":"ready"}'
+if ! printf '/status\n1\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode http \
+    --env-list-limit 1 \
+    --suppress-removed-logs
+) >"$http_get_output" 2>&1; then
+  cat "$http_get_output" >&2
+  fail "interactive HTTP GET mode returned a non-zero status"
+fi
+
+assert_contains "$http_get_output" "JBoss EAP ログからコンテキストルートを検出しました: /orders"
+assert_contains "$http_get_output" "JBoss EAP ログから HTTP リスナーポートを検出しました: 8080"
+assert_contains "$http_get_output" "Docker 公開ポートを検出しました: 8080/tcp -> 127.0.0.1:18080"
+assert_contains "$http_get_output" "HTTP ステータスコード : 201"
+assert_contains "$http_get_output" '{"message":"ready"}'
+assert_contains "$FAKE_DOCKER_CALLS" "port cid-app 8080/tcp"
+assert_contains "$FAKE_CURL_CALLS" "--request GET http://127.0.0.1:18080/orders/status"
+assert_not_contains "$FAKE_CURL_CALLS" "--data-binary"
+assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+http_json_output="$TEST_TMP/keep-mode-http-json.out"
+: > "$FAKE_DOCKER_CALLS"
+: > "$FAKE_CURL_CALLS"
+export FAKE_CURL_STATUS="202"
+export FAKE_CURL_BODY='{"accepted":true}'
+if ! printf 'submit\n2\n1\n{"target":"orders"}\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode http \
+    --env-list-limit 1 \
+    --suppress-removed-logs
+) >"$http_json_output" 2>&1; then
+  cat "$http_json_output" >&2
+  fail "interactive HTTP JSON POST mode returned a non-zero status"
+fi
+
+assert_contains "$http_json_output" "HTTP ステータスコード : 202"
+assert_contains "$http_json_output" '{"accepted":true}'
+assert_contains "$FAKE_CURL_CALLS" "--request POST"
+assert_contains "$FAKE_CURL_CALLS" "--header Content-Type: application/json"
+assert_contains "$FAKE_CURL_CALLS" "--data-binary @-"
+assert_contains "$FAKE_CURL_CALLS" 'request-body={"target":"orders"}'
+assert_contains "$FAKE_CURL_CALLS" "http://127.0.0.1:18080/orders/submit"
+
+http_form_output="$TEST_TMP/keep-mode-http-form.out"
+: > "$FAKE_DOCKER_CALLS"
+: > "$FAKE_CURL_CALLS"
+export FAKE_CURL_STATUS="200"
+export FAKE_CURL_BODY='token-issued'
+if ! printf '/token\n2\n2\ngrant_type=client_credentials&scope=read\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode http \
+    --jboss-context-root /custom/ \
+    --jboss-http-port 8080 \
+    --env-list-limit 1 \
+    --suppress-removed-logs
+) >"$http_form_output" 2>&1; then
+  cat "$http_form_output" >&2
+  fail "interactive HTTP form POST mode returned a non-zero status"
+fi
+
+assert_contains "$http_form_output" "指定された JBoss EAP コンテキストルートを使用します: /custom"
+assert_contains "$http_form_output" "指定された JBoss EAP HTTP リスナーポートを使用します: 8080"
+assert_contains "$http_form_output" "HTTP ステータスコード : 200"
+assert_contains "$http_form_output" "token-issued"
+assert_contains "$FAKE_CURL_CALLS" "--header Content-Type: application/x-www-form-urlencoded"
+assert_contains "$FAKE_CURL_CALLS" "--data-binary @-"
+assert_contains "$FAKE_CURL_CALLS" "request-body=grant_type=client_credentials&scope=read"
+assert_contains "$FAKE_CURL_CALLS" "http://127.0.0.1:18080/custom/token"
+
+http_failure_output="$TEST_TMP/keep-mode-http-curl-failure.out"
+: > "$FAKE_DOCKER_CALLS"
+: > "$FAKE_CURL_CALLS"
+export FAKE_CURL_STATUS="000"
+export FAKE_CURL_BODY='connection failed'
+export FAKE_CURL_EXIT_STATUS="7"
+if printf '/status\n1\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode http \
+    --env-list-limit 1 \
+    --suppress-removed-logs
+) >"$http_failure_output" 2>&1; then
+  cat "$http_failure_output" >&2
+  fail "curl transport failure unexpectedly returned zero"
+fi
+
+assert_contains "$http_failure_output" "HTTP ステータスコード : 000"
+assert_contains "$http_failure_output" "connection failed"
+assert_contains "$http_failure_output" "curl による HTTP 通信に失敗しました (exit=7, HTTP=000)"
+assert_contains "$http_failure_output" "コンテナを残します (--keep-container)"
+assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+unset FAKE_CURL_STATUS FAKE_CURL_BODY FAKE_CURL_EXIT_STATUS
+
 export FAKE_DOCKER_CLEANED="$TEST_TMP/docker.cleaned"
 
 dry_run_cleanup_output="$TEST_TMP/cleanup-dry-run.out"
@@ -288,4 +444,4 @@ assert_contains "$FAKE_DOCKER_CALLS" "network prune --force"
 assert_contains "$FAKE_DOCKER_CALLS" "system prune --all --volumes --force"
 assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
 
-printf 'PASS: build_and_verify.sh EAP 8.1 log, directory tree, and Docker cleanup scenarios\n'
+printf 'PASS: build_and_verify.sh EAP 8.1 log, interaction, directory tree, and Docker cleanup scenarios\n'

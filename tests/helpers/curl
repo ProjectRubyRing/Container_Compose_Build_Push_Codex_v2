@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+if [ -n "${FAKE_CURL_CALLS:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_CURL_CALLS"
+fi
+
+output_file=""
+body_from_stdin="false"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output)
+      output_file="${2:-}"
+      shift 2
+      ;;
+    --data-binary)
+      [ "${2:-}" = "@-" ] && body_from_stdin="true"
+      shift 2
+      ;;
+    -w|--write-out|-X|--request|-H|--header|--data|--data-raw|-m|--max-time|--noproxy)
+      shift 2
+      ;;
+    -s|-S|-sS|-k)
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [ "$body_from_stdin" = "true" ]; then
+  request_body="$(cat)"
+  if [ -n "${FAKE_CURL_CALLS:-}" ]; then
+    printf 'request-body=%s\n' "$request_body" >> "$FAKE_CURL_CALLS"
+  fi
+fi
+
+if [ -z "$output_file" ]; then
+  printf 'fake curl: response output file was not specified\n' >&2
+  exit 64
+fi
+
+printf '%s\n' "${FAKE_CURL_BODY:-result=ok}" > "$output_file"
+printf '%s' "${FAKE_CURL_STATUS:-200}"
+exit "${FAKE_CURL_EXIT_STATUS:-0}"

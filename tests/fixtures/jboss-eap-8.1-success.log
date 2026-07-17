@@ -9,6 +9,7 @@ app-1  | 09:17:43,800 INFO  [org.jboss.as.repository] (management-handler-thread
 app-1  | 09:17:43,900 INFO  [org.jboss.as.server] (management-handler-thread - 1) WFLYSRV0009: Undeployed "old.war" (runtime-name: "old.war")
 app-1  | 09:17:44,000 INFO  [org.jboss.as.server.deployment] (MSC service thread 1-2) WFLYSRV0027: Starting deployment of "orders.war" (runtime-name: "orders.war")
 app-1  | 09:17:44,100 INFO  [com.example.orders.Bootstrap] (ServerService Thread Pool -- 1) APP000001: Orders application initialized
+app-1  | 09:17:44,150 INFO  [org.wildfly.extension.undertow] (MSC service thread 1-1) WFLYUT0006: Undertow HTTP listener default listening on 0.0.0.0:8080
 app-1  | 09:17:44,200 INFO  [org.wildfly.extension.undertow] (ServerService Thread Pool -- 1) WFLYUT0021: Registered web context: '/orders' for server 'default-server'
 app-1  | 09:17:44,300 INFO  [org.jboss.as.server] (Controller Boot Thread) WFLYSRV0010: Deployed "orders.war" (runtime-name : "orders.war")
 app-1  | 09:17:47,305 INFO  [org.jboss.as] (Controller Boot Thread) WFLYSRV0025: JBoss EAP 8.1 Update 0.1 (WildFly Core 27.1.0.Final-redhat-00010) started in 4304ms - Started 299 of 560 services

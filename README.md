@@ -12,7 +12,9 @@
 さらに、**ビルドのみを行う** (ECR へはプッシュしない) 専用スクリプトとして
 `build_and_verify.sh` を提供します。ビルドに加えて、コンテナを起動して
 **jbosseap (WildFly/JBoss EAP) サーバーの起動確認**や、**指定 URL への HTTP 応答確認**、
-**JNDI データソースの成功名 / 作成失敗 warning・error の表示**、**コンテナ内ディレクトリツリーの表示**を任意で行えます。`build_and_push.sh --build-only` はこのスクリプトへ委譲されます
+**JNDI データソースの成功名 / 作成失敗 warning・error の表示**、**コンテナ内ディレクトリツリーの表示**、
+起動状態を維持した検証対象コンテナへの **bash 直接接続 / 対話式 HTTP 通信**を任意で行えます。
+`build_and_push.sh --build-only` はこのスクリプトへ委譲されます
 (後述の「ビルドのみの実行 / 起動・URL 確認」を参照)。
 
 想定実行環境: RHEL 9.6 の EC2 インスタンス (bash / GNU coreutils / Docker CE)。
@@ -63,6 +65,9 @@
 | `--output FILE` | imagedefinition の出力先 | `imagedefinition.json` |
 | `--dry-run` | 実際のビルド/ログイン/タグ付け/プッシュ/ファイル出力は行わず、実行内容のプレビューのみ表示する | `false` |
 | `--cleanup-all-docker-data` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。処理終了時に確認ダイアログを表示し、承認後、現在の Docker context の全コンテナ・全イメージ・全ローカルボリューム・未使用ネットワーク・現在の daemon で削除可能な全ビルドキャッシュを削除する | `false` |
+| `--keep-container-mode bash\|http` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。JBoss EAP の起動確認後もコンテナを残し、検証対象へ `/bin/bash` で直接接続するか、対話式 HTTP 通信を行う。`--verify-startup` と `--keep-container` を暗黙に有効化する | (なし) |
+| `--jboss-context-root ROOT` | 対話式 HTTP モードの JBoss EAP コンテキストルートを明示する。未指定時は起動ログから検出する | (自動検出、検出不能時は `/`) |
+| `--jboss-http-port PORT` | 対話式 HTTP モードのコンテナ側 HTTP リスナーポートを明示する。Docker の公開ポートがあれば接続先へ自動変換する | (自動検出、検出不能時は `8080`) |
 | `--log-dir DIR` | コンソールに出力されるログを `DIR` 配下のログファイルにも保存する。画面表示は従来どおり継続し、ログ末尾には処理実行時間 (経過秒数) も記録される。`DIR` が無ければ自動作成する。ファイル名は compose 版が `build_and_push_<YYYYMMDDHHMMSS>.log`、buildx 版が `buildx_build_and_push_<YYYYMMDDHHMMSS>.log`。compose 版で `--build-only` 委譲時も、委譲先 (`build_and_verify.sh`) の出力を含めて記録する | (なし。指定時のみログファイル出力) |
 | `--build-only` | ビルドのみを実行する (**compose 版のみ**。処理は `build_and_verify.sh` に委譲)。ECR 権限チェック/ログイン/タグ付け/プッシュ/`imagedefinition.json` の出力は行わない。`--copy-file` 指定時は事前コピー → ビルド → 自動削除を行う。`--verify-startup` / `--verify-url` 等の追加オプションも委譲される (後述) | `false` |
 | `--copy-file SRC:DEST_DIR` | ビルド前に `SRC` を `DEST_DIR` へコピーし、ビルド終了後に自動削除する。繰り返し指定で複数ファイルに対応 | (なし) |
@@ -331,11 +336,70 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
     --startup-service app --startup-service batch
 ```
 
-EAP 8.1 のログ解析とディレクトリツリー集計は、Docker をモックした回帰テストで確認できます。
+EAP 8.1 のログ解析、対話操作、ディレクトリツリー集計は、Docker / curl をモックした
+回帰テストで確認できます。
 
 ```bash
 bash tests/build_and_verify_test.sh
 ```
+
+### 起動状態を維持した対話操作 (`--keep-container-mode`)
+
+`--keep-container-mode bash|http` を指定すると、JBoss EAP の起動確認に成功した後も
+対象コンテナを停止せず、次の操作をその場で実行できます。このオプションは
+`--verify-startup` と `--keep-container` を暗黙に有効化します。検証対象コンテナが
+複数ある場合は、サービス名とコンテナ名を表示する番号選択ダイアログが開きます。
+
+- `bash`: 選択したコンテナへ `docker exec -it <container> /bin/bash` で直接接続します。
+  bash を終了した後もコンテナは起動状態を維持します。対象イメージには
+  `/bin/bash` が必要です。
+- `http`: JBoss EAP の接続情報を解決した後、パス、HTTP メソッド、必要な POST
+  ボディをダイアログで入力し、ホスト側の `curl` から 1 回リクエストします。
+  HTTP ステータスコードとレスポンスボディ全体を区切り付きで表示します。
+
+HTTP モードでは、`WFLYUT0021` からコンテキストルート、`WFLYUT0006` から
+コンテナ側 HTTP リスナーポートを取得します。コンテキストルートが複数ある場合は
+番号で選択できます。ポートは `docker port` の公開先を優先し、未公開の場合は
+コンテナ IP へ直接接続します。検出できない場合の既定はコンテキストルート `/`、
+ポート `8080` です。環境に応じて `--jboss-context-root` と `--jboss-http-port` で
+明示的に上書きできます。入力する URL 情報はコンテキストルート以降のパスだけです。
+
+HTTP メソッドは `GET` / `POST` の番号選択です。POST では続けて次のいずれかを選び、
+ボディを 1 行で入力します。
+
+- JSON: `Content-Type: application/json`
+- form URL encoded: `Content-Type: application/x-www-form-urlencoded`
+
+```bash
+# 起動確認後、app コンテナの bash へ直接接続
+./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode bash
+
+# 起動確認後、JBoss EAP へ対話式に HTTP 通信
+# 例: /orders が検出された場合、入力した health は /orders/health になる
+./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode http
+
+# ログから検出できない環境ではコンテキストルートとコンテナ側ポートを明示
+./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode http \
+    --jboss-context-root /orders \
+    --jboss-http-port 8080
+```
+
+HTTP `4xx` / `5xx` も調査対象の応答としてステータスと本文を表示します。接続失敗や
+タイムアウトなど `curl` 自体が失敗した場合は終了コード `1` になります。1 リクエストの
+最大時間は `--url-timeout` (既定 60 秒) で変更できます。操作終了後の
+コンテナは自動削除されないため、不要になったら表示される `docker compose ... down`
+コマンドで停止・削除してください。`--cleanup-all-docker-data` とは併用できません。
+`build_and_push.sh --build-only --log-dir` 経由で使う場合は、bash セッションの表示内容や
+HTTP レスポンスもログファイルへ保存されるため、秘密情報を画面へ出力しないでください。
 
 ### URL 応答確認 (`--verify-url`)
 
