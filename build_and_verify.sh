@@ -98,7 +98,7 @@ STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV002[56]|WFLYCTL0183|WFLYCTL0448|JBoss EAP.
 # WFLYJCA0001: Bound data source / WFLYJCA0002: Bound XA data source /
 # WFLYJCA0003: Bound connection factory
 # テキストパターンも追加し、メッセージコードが異なるバージョンにも対応する。
-DATASOURCE_SUCCESS_LOG_PATTERN='WFLYJCA0001|WFLYJCA0002|WFLYJCA0003|Bound data source|Bound XA data source|Bound connection factory'
+DATASOURCE_SUCCESS_LOG_PATTERN='WFLYJCA000[123]|Bound data source|Bound XA data source|Bound connection factory'
 DATASOURCE_ERROR_TARGET_PATTERN='datasource|data source|java:/|jboss\.naming\.context\.java\.'
 # WFLYJCA[0-9]{4} は DATASOURCE_ERROR_WFLYJCA_WITH_DETAIL_PATTERN で個別に扱うため
 # ここには含めない (含めると Bound data source 等の成功ログが誤って error と判定される)。
