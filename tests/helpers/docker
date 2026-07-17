@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+if [ -n "${FAKE_DOCKER_CALLS:-}" ]; then
+  printf '%s\n' "$*" >> "$FAKE_DOCKER_CALLS"
+fi
+
+fail() {
+  printf 'fake docker: unsupported arguments: %s\n' "$*" >&2
+  exit 64
+}
+
+if [ "${1:-}" = "compose" ]; then
+  shift
+  subcommand=""
+  for arg in "$@"; do
+    case "$arg" in
+      version|build|up|logs|ps|down)
+        subcommand="$arg"
+        break
+        ;;
+    esac
+  done
+
+  case "$subcommand" in
+    version)
+      printf 'Docker Compose version v2.29.0\n'
+      ;;
+    build)
+      printf '[fake-build] BUILDKIT_PROGRESS=%s\n' "${BUILDKIT_PROGRESS:-unset}"
+      ;;
+    up)
+      printf 'fake app container started\n'
+      ;;
+    logs)
+      if [ -z "${FAKE_COMPOSE_LOG_FILE:-}" ]; then
+        printf 'FAKE_COMPOSE_LOG_FILE is not set\n' >&2
+        exit 65
+      fi
+      cat "$FAKE_COMPOSE_LOG_FILE"
+      ;;
+    ps)
+      printf 'cid-app\n'
+      ;;
+    down)
+      printf 'fake app container removed\n'
+      ;;
+    *)
+      fail "compose $*"
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
+  case "$*" in
+    *".Config.Env"*)
+      printf 'PATH=/usr/bin\n'
+      ;;
+    *)
+      printf 'sha256:test-image|2026-07-18T00:00:00Z|12345\n'
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "inspect" ]; then
+  case "$*" in
+    *".State.Running"*)
+      printf 'true\n'
+      ;;
+    *"com.docker.compose.service"*)
+      printf 'app\n'
+      ;;
+    *"{{.Name}}"*)
+      printf '/test-app-1\n'
+      ;;
+    *"{{.Image}}"*)
+      printf 'fake-image\n'
+      ;;
+    *".Config.Env"*)
+      printf 'PATH=/usr/bin\n'
+      ;;
+    *)
+      fail "$@"
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ]; then
+  printf 'PATH=/usr/bin\n'
+  exit 0
+fi
+
+fail "$@"

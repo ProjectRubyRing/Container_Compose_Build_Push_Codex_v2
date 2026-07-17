@@ -159,6 +159,10 @@ CI でもそのまま利用できます。compose 版 (`build_and_push.sh`) / bu
   (`aws` コマンドが無くても実行できます)。
 - **`--copy-file` が指定されている場合は、ビルド前に事前ファイルコピーを行った
   うえでビルドし、処理後に自動削除します** (`build_and_push.sh` と同じ挙動)。
+- BuildKit の進捗形式は既定で `plain` とし、各ビルドステップを保存可能なログとして
+  出力します。必要な場合は `BUILDKIT_PROGRESS` 環境変数で変更できます。
+- ビルド完了後は対象イメージを検査し、イメージ ID・作成日時・サイズを
+  `ビルド結果` として出力します。対象イメージが存在しない場合は失敗終了します。
 
 ```bash
 # ビルドのみ (事前ファイルコピーあり)
@@ -215,9 +219,12 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 サーバーの起動完了**をログから確認します。確認後はコンテナを自動的に停止・削除
 します (`--keep-container` を付けると残せます)。
 
-- 起動完了とみなすログのパターンは既定で JBoss EAP / WildFly の起動完了メッセージ
-  (`WFLYSRV0025` / `WFLYSRV0026` = `started in ...`) です。別の起動メッセージを
+- JBoss EAP 8.1 の正常起動は既定で `WFLYSRV0025` のみを成功とします。
+  `WFLYSRV0026` (エラー付き起動) または `WFLYSRV0056` (boot failure) を検出した場合は、
+  正常起動ログの有無にかかわらず直ちに失敗終了します。別の正常起動メッセージを
   使う場合は `--startup-log-pattern` (拡張正規表現) で上書きできます。
+- `compose up` の直前時刻をログ取得開始時刻として `compose logs --since` に渡し、
+  再利用したコンテナに残る過去の起動ログを今回の結果として扱わないようにします。
 - `--startup-service NAME` で **JBoss EAP の起動確認を行う Compose サービス**を
   指定できます。繰り返し指定またはカンマ区切りで複数指定でき、指定した全サービスの
   ログを個別に確認します。このオプションだけでも `--verify-startup` が暗黙に有効に
@@ -227,10 +234,14 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
   コンテナが起動途中で停止した場合は、コンテナログの末尾を表示して失敗終了します。
 - 起動確認が成功した場合も、重要な起動ログを表示します。表示行数は
   `--startup-log-lines` で指定でき、既定は最新 20 行です。
-- 起動確認ログには、`WFLYJCA0001` から抽出した **利用可能な JNDI データソース名**に加え、
-  JNDI データソース作成に失敗した場合の **warning / error 関連ログ** も表示されます。
-- 起動確認時はアプリケーションのデプロイ関連ログも表示します。
-  正常デプロイ時はデプロイパスを含むログ、エラー時はエラー内容を含むログを表示します。
+- 起動確認ログには、`WFLYJCA0001` と `WFLYJCA0098` から抽出した
+  **利用可能な JNDI データソース名**に加え、作成に失敗した場合の
+  **warning / error 関連ログ**も表示されます。Jakarta Connectors の
+  `WFLYJCA0002` やドライバー生成警告の `WFLYJCA0003` は成功扱いしません。
+- 起動確認時は `WFLYSRV0027` (開始)、`WFLYUT0021` (Web コンテキスト登録)、
+  `WFLYSRV0010` (完了) など、EAP 8.1 のアプリケーションデプロイ
+  ライフサイクルを表示します。正常時はアーカイブ名と Web コンテキスト、
+  rollback や scanner エラー時は該当エラーを分けて表示します。
   表示行数は `--deploy-log-lines` で指定でき、既定は最新 20 行です。
 - 動作確認が成功した場合は、**対象コンテナで参照可能な環境変数一覧**も表示します。
   種別は `compose.yml environment` / `build引数` / `コンテナ内部処理` /
@@ -263,6 +274,12 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 # app と batch の両方で JBoss EAP の起動完了を個別に確認
 ./build_and_verify.sh --compose-service app,batch,db \
     --startup-service app --startup-service batch
+```
+
+EAP 8.1 のログ解析は、Docker をモックした回帰テストで確認できます。
+
+```bash
+bash tests/build_and_verify_test.sh
 ```
 
 ### URL 応答確認 (`--verify-url`)
