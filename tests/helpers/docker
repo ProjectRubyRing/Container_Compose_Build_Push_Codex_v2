@@ -205,6 +205,62 @@ if [ "${1:-}" = "inspect" ]; then
   exit 0
 fi
 
+emit_fake_find_entry() {
+  local entry_depth="$1" entry_path="$2"
+  if [ "$fake_find_max_depth" = "all" ] || [ "$entry_depth" -le "$fake_find_max_depth" ]; then
+    printf '%s\0' "$entry_path"
+  fi
+}
+
+if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ] && [ "${4:-}" = "/" ]; then
+  if [ "${FAKE_DOCKER_FIND_FAIL:-false}" = "true" ]; then
+    printf 'find: not found\n' >&2
+    exit 127
+  fi
+
+  fake_find_type=""
+  fake_find_max_depth="all"
+  fake_find_next=""
+  for arg in "$@"; do
+    if [ "$fake_find_next" = "type" ]; then
+      fake_find_type="$arg"
+      fake_find_next=""
+      continue
+    fi
+    if [ "$fake_find_next" = "maxdepth" ]; then
+      fake_find_max_depth="$arg"
+      fake_find_next=""
+      continue
+    fi
+    case "$arg" in
+      -type) fake_find_next="type" ;;
+      -maxdepth) fake_find_next="maxdepth" ;;
+    esac
+  done
+
+  case "$fake_find_type" in
+    d)
+      emit_fake_find_entry 0 "/"
+      emit_fake_find_entry 1 "/app"
+      emit_fake_find_entry 2 "/app/config"
+      emit_fake_find_entry 1 "/empty"
+      ;;
+    f)
+      emit_fake_find_entry 1 "/LICENSE"
+      emit_fake_find_entry 2 "/app/application.jar"
+      emit_fake_find_entry 2 "/app/legacy.jar"
+      emit_fake_find_entry 2 "/app/archive.tar.gz"
+      emit_fake_find_entry 3 "/app/config/application.yaml"
+      emit_fake_find_entry 3 "/app/config/override.yaml"
+      emit_fake_find_entry 3 "/app/config/.env"
+      ;;
+    *)
+      fail "$@"
+      ;;
+  esac
+  exit 0
+fi
+
 if [ "${1:-}" = "exec" ]; then
   printf 'PATH=/usr/bin\n'
   exit 0

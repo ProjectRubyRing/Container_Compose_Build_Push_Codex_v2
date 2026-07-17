@@ -40,6 +40,15 @@ assert_matches() {
   grep -Eq -- "$pattern" "$file" || fail "expected /$pattern/ in $file"
 }
 
+assert_before() {
+  local file="$1" first="$2" second="$3" first_line second_line
+  first_line="$(grep -nF -- "$first" "$file" | head -n 1 | cut -d: -f1 || true)"
+  second_line="$(grep -nF -- "$second" "$file" | head -n 1 | cut -d: -f1 || true)"
+  [ -n "$first_line" ] || fail "expected '$first' in $file"
+  [ -n "$second_line" ] || fail "expected '$second' in $file"
+  [ "$first_line" -lt "$second_line" ] || fail "expected '$first' before '$second' in $file"
+}
+
 mkdir -p "$TEST_TMP/bin"
 cp "$TEST_DIR/helpers/docker" "$TEST_TMP/bin/docker"
 chmod 755 "$TEST_TMP/bin/docker"
@@ -76,7 +85,76 @@ assert_contains "$success_output" "/orders"
 assert_not_contains "$success_output" "java:/JmsXA"
 assert_not_contains "$success_output" "old.war"
 assert_not_contains "$success_output" "/opt/eap/standalone/data/content/ab/cd/content"
+assert_contains "$success_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: all)"
+assert_contains "$success_output" "  app/"
+assert_contains "$success_output" "    [ファイル] .gz: 1 件"
+assert_contains "$success_output" "    [ファイル] .jar: 2 件"
+assert_contains "$success_output" "    config/"
+assert_contains "$success_output" "      [ファイル] .yaml: 2 件"
+assert_contains "$success_output" "[ファイル] (拡張子なし): 1 件"
+assert_contains "$success_output" "  empty/"
+assert_not_contains "$success_output" "application.jar"
+assert_not_contains "$success_output" "application.yaml"
+assert_not_contains "$success_output" "archive.tar.gz"
+assert_before "$success_output" "環境変数一覧 (サービス: app" "コンテナ内ディレクトリツリー (サービス: app"
 assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ app'
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type d -print0"
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type f -print0"
+
+tree_depth_output="$TEST_TMP/tree-depth.out"
+: > "$FAKE_DOCKER_CALLS"
+if ! (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --verify-startup \
+    --compose-service app \
+    --startup-service app \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$tree_depth_output" 2>&1; then
+  cat "$tree_depth_output" >&2
+  fail "directory tree depth scenario returned a non-zero status"
+fi
+
+assert_contains "$tree_depth_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: 1)"
+assert_contains "$tree_depth_output" "  app/"
+assert_contains "$tree_depth_output" "    [ファイル] .jar: 2 件"
+assert_contains "$tree_depth_output" "  empty/"
+assert_not_contains "$tree_depth_output" "    config/"
+assert_not_contains "$tree_depth_output" "[ファイル] .yaml:"
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 1 -type d -print0"
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 2 -type f -print0"
+
+invalid_tree_depth_output="$TEST_TMP/tree-depth-invalid.out"
+if (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh --dry-run --directory-tree-depth 0
+) >"$invalid_tree_depth_output" 2>&1; then
+  cat "$invalid_tree_depth_output" >&2
+  fail "invalid directory tree depth unexpectedly returned zero"
+fi
+assert_contains "$invalid_tree_depth_output" "--directory-tree-depth には 1 以上の整数を指定してください: 0"
+
+tree_find_failure_output="$TEST_TMP/tree-find-failure.out"
+: > "$FAKE_DOCKER_CALLS"
+export FAKE_DOCKER_FIND_FAIL="true"
+if ! (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --verify-startup \
+    --compose-service app \
+    --startup-service app \
+    --env-list-limit 1 \
+    --suppress-removed-logs
+) >"$tree_find_failure_output" 2>&1; then
+  cat "$tree_find_failure_output" >&2
+  fail "missing container find command unexpectedly failed verification"
+fi
+unset FAKE_DOCKER_FIND_FAIL
+
+assert_contains "$tree_find_failure_output" "コンテナ内ディレクトリツリーを取得できませんでした (サービス: app, コンテナ: test-app-1)"
+assert_contains "$tree_find_failure_output" "ビルドおよび確認が完了しました。"
 
 failure_output="$TEST_TMP/failure.out"
 : > "$FAKE_DOCKER_CALLS"
@@ -210,4 +288,4 @@ assert_contains "$FAKE_DOCKER_CALLS" "network prune --force"
 assert_contains "$FAKE_DOCKER_CALLS" "system prune --all --volumes --force"
 assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
 
-printf 'PASS: build_and_verify.sh EAP 8.1 log and Docker cleanup scenarios\n'
+printf 'PASS: build_and_verify.sh EAP 8.1 log, directory tree, and Docker cleanup scenarios\n'

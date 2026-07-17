@@ -12,7 +12,7 @@
 さらに、**ビルドのみを行う** (ECR へはプッシュしない) 専用スクリプトとして
 `build_and_verify.sh` を提供します。ビルドに加えて、コンテナを起動して
 **jbosseap (WildFly/JBoss EAP) サーバーの起動確認**や、**指定 URL への HTTP 応答確認**、
-**JNDI データソースの成功名 / 作成失敗 warning・error の表示**を任意で行えます。`build_and_push.sh --build-only` はこのスクリプトへ委譲されます
+**JNDI データソースの成功名 / 作成失敗 warning・error の表示**、**コンテナ内ディレクトリツリーの表示**を任意で行えます。`build_and_push.sh --build-only` はこのスクリプトへ委譲されます
 (後述の「ビルドのみの実行 / 起動・URL 確認」を参照)。
 
 想定実行環境: RHEL 9.6 の EC2 インスタンス (bash / GNU coreutils / Docker CE)。
@@ -68,6 +68,7 @@
 | `--copy-file SRC:DEST_DIR` | ビルド前に `SRC` を `DEST_DIR` へコピーし、ビルド終了後に自動削除する。繰り返し指定で複数ファイルに対応 | (なし) |
 | `--env-list-limit N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後に表示する環境変数一覧の件数。各対象コンテナごとに先頭 `N` 件を表示し、既定は `all` | `all` |
 | `--env-list-file FILE` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後の環境変数一覧を `FILE` にも出力する。画面表示も継続 | (なし) |
+| `--directory-tree-depth N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。環境変数一覧の後に表示する対象コンテナ内ディレクトリツリーの最大深さ。`/` 直下を深さ `1` とし、通常ファイルは各ディレクトリ直下の拡張子別件数で表示する | `all` (最下層まで) |
 | `--jboss-password-param NAME` | JBoss のマスターパスワードを AWS パラメータストア (SSM Parameter Store) の指定キー `NAME` から取得し、環境変数経由の BuildKit シークレットとしてビルドに注入する (後述) | (なし) |
 | `--jboss-password VALUE` | JBoss のマスターパスワードを直接指定する (パラメータストアから取得しない場合)。`--jboss-password-param` とは同時指定不可 | (なし) |
 | `--jboss-password-env NAME` | シークレットの受け渡しに使う環境変数名。このオプションのみを指定した場合は、事前に export 済みの環境変数の値をそのまま使う | `JBOSS_MASTER_PASSWORD` |
@@ -291,6 +292,14 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 - 環境変数一覧の表示件数は `--env-list-limit` で制御できます。既定は `all`
   (全件表示) です。
 - `--env-list-file FILE` を指定すると、同じ一覧をファイルにも保存できます。
+- 環境変数一覧の後に、同じ対象コンテナの `/` を起点とした**ディレクトリツリー**を
+  表示します。通常ファイルの名前は表示せず、各ディレクトリ直下で最終拡張子ごとの
+  件数に集約します (`archive.tar.gz` は `.gz`、`.env` と末尾がドットの名前は
+  `(拡張子なし)`)。空ディレクトリもディレクトリ行として表示します。
+- `--directory-tree-depth N` では `/` 直下を深さ `1` として最大ディレクトリ深さを
+  制限できます。既定の `all` は末端のディレクトリまで探索します。通常ファイル以外の
+  特殊ファイルは集計せず、シンボリックリンクは循環を避けるため追跡しません。
+  コンテナ内で `find` を実行できない場合は警告し、ビルド・動作確認の成功状態は維持します。
 
 ```bash
 # ビルド + jbosseap 起動確認
@@ -309,6 +318,10 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
     --env-list-limit 10 \
     --env-list-file ./logs/container_envs.txt
 
+# コンテナ内ディレクトリツリーを / 直下から 3 階層まで表示
+./build_and_verify.sh --verify-startup \
+    --directory-tree-depth 3
+
 # app / batch / db をまとめてビルド・起動し、JBoss EAP の app だけを確認
 ./build_and_verify.sh --compose-service app,batch,db \
     --startup-service app
@@ -318,7 +331,7 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
     --startup-service app --startup-service batch
 ```
 
-EAP 8.1 のログ解析は、Docker をモックした回帰テストで確認できます。
+EAP 8.1 のログ解析とディレクトリツリー集計は、Docker をモックした回帰テストで確認できます。
 
 ```bash
 bash tests/build_and_verify_test.sh
