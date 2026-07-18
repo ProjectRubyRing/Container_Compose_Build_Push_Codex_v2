@@ -68,6 +68,9 @@ if ! (
     --compose-service app \
     --startup-service app \
     --env-list-limit 1 \
+    --directory-tree-depth 2 \
+    --deployment-dir-env APP_CONFIG_DIR \
+    --report-dir "$TEST_TMP/reports" \
     --suppress-removed-logs
 ) >"$success_output" 2>&1; then
   cat "$success_output" >&2
@@ -87,21 +90,52 @@ assert_contains "$success_output" "/orders"
 assert_not_contains "$success_output" "java:/JmsXA"
 assert_not_contains "$success_output" "old.war"
 assert_not_contains "$success_output" "/opt/eap/standalone/data/content/ab/cd/content"
-assert_contains "$success_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: all)"
+assert_contains "$success_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: 2)"
 assert_contains "$success_output" "  app/"
-assert_contains "$success_output" "    [ファイル] .gz: 1 件"
-assert_contains "$success_output" "    [ファイル] .jar: 2 件"
+assert_contains "$success_output" "    [ファイル] application.jar"
+assert_contains "$success_output" "    [ファイル] archive.tar.gz"
+assert_contains "$success_output" "    [ファイル] legacy.jar"
 assert_contains "$success_output" "    config/"
-assert_contains "$success_output" "      [ファイル] .yaml: 2 件"
-assert_contains "$success_output" "[ファイル] (拡張子なし): 1 件"
+assert_contains "$success_output" "      [ファイル] application.yaml"
+assert_contains "$success_output" "      [ファイル] .env"
+assert_contains "$success_output" "  [ファイル] LICENSE"
 assert_contains "$success_output" "  empty/"
-assert_not_contains "$success_output" "application.jar"
-assert_not_contains "$success_output" "application.yaml"
-assert_not_contains "$success_output" "archive.tar.gz"
+assert_contains "$success_output" "JBoss EAP デプロイ済み Web アプリケーションのディレクトリ構造"
+assert_contains "$success_output" "[JBoss EAP デプロイ先]"
+assert_contains "$success_output" "[Web アプリケーションルート]"
+assert_contains "$success_output" "[Java クラスパスルート]"
+assert_contains "$success_output" "[環境変数 APP_CONFIG_DIR]"
+assert_contains "$success_output" "[ファイル] .class: 11 件"
+assert_contains "$success_output" "[ファイル] .properties: 1 件"
+assert_contains "$success_output" "[ファイル] runtime.properties"
+assert_contains "$success_output" "API_TOKEN=[REDACTED]"
+assert_not_contains "$success_output" "do-not-log-this-value"
+assert_not_contains "$success_output" "Order01.class"
+assert_not_contains "$success_output" "deep.json"
 assert_before "$success_output" "環境変数一覧 (サービス: app" "コンテナ内ディレクトリツリー (サービス: app"
+assert_before "$success_output" "コンテナ内ディレクトリツリー (サービス: app" "JBoss EAP デプロイ済み Web アプリケーションのディレクトリ構造"
 assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ app'
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type d -print0"
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type f -print0"
+
+report_files=("$TEST_TMP/reports"/build_and_verify_*.txt)
+[ ${#report_files[@]} -eq 1 ] && [ -f "${report_files[0]}" ] \
+  || fail "expected one timestamped full build report"
+full_report="${report_files[0]}"
+[[ "$(basename "$full_report")" =~ ^build_and_verify_[0-9]{14}(_[0-9]+)?\.txt$ ]] \
+  || fail "unexpected full build report filename: $full_report"
+assert_matches "$full_report" 'build_and_verify\.sh 全量ビルドレポート'
+assert_contains "$full_report" "全体結果     : 成功"
+assert_contains "$full_report" "[1] ビルド結果"
+assert_contains "$full_report" "[2] 環境変数一覧 (全件)"
+assert_contains "$full_report" "[3] コンテナ内ディレクトリツリー (全深度・全ファイル名)"
+assert_contains "$full_report" "[4] JBoss EAP デプロイ構造 (全深度・全ファイル名)"
+assert_contains "$full_report" "API_TOKEN=[REDACTED]"
+assert_not_contains "$full_report" "do-not-log-this-value"
+assert_contains "$full_report" "application.yaml"
+assert_contains "$full_report" "deep.json"
+assert_contains "$full_report" "Order01.class"
+assert_contains "$full_report" "Order11.class"
 
 tree_depth_output="$TEST_TMP/tree-depth.out"
 : > "$FAKE_DOCKER_CALLS"
@@ -121,10 +155,11 @@ fi
 
 assert_contains "$tree_depth_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: 1)"
 assert_contains "$tree_depth_output" "  app/"
-assert_contains "$tree_depth_output" "    [ファイル] .jar: 2 件"
+assert_contains "$tree_depth_output" "    [ファイル] application.jar"
+assert_contains "$tree_depth_output" "    [ファイル] archive.tar.gz"
 assert_contains "$tree_depth_output" "  empty/"
 assert_not_contains "$tree_depth_output" "    config/"
-assert_not_contains "$tree_depth_output" "[ファイル] .yaml:"
+assert_not_contains "$tree_depth_output" "application.yaml"
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 1 -type d -print0"
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 2 -type f -print0"
 
@@ -137,6 +172,26 @@ if (
   fail "invalid directory tree depth unexpectedly returned zero"
 fi
 assert_contains "$invalid_tree_depth_output" "--directory-tree-depth には 1 以上の整数を指定してください: 0"
+
+invalid_file_limit_output="$TEST_TMP/file-limit-invalid.out"
+if (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh --dry-run --directory-file-limit 0
+) >"$invalid_file_limit_output" 2>&1; then
+  cat "$invalid_file_limit_output" >&2
+  fail "invalid directory file limit unexpectedly returned zero"
+fi
+assert_contains "$invalid_file_limit_output" "--directory-file-limit には 1 以上の整数を指定してください: 0"
+
+invalid_deployment_env_output="$TEST_TMP/deployment-env-invalid.out"
+if (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh --dry-run --deployment-dir-env 'INVALID-NAME'
+) >"$invalid_deployment_env_output" 2>&1; then
+  cat "$invalid_deployment_env_output" >&2
+  fail "invalid deployment directory environment name unexpectedly returned zero"
+fi
+assert_contains "$invalid_deployment_env_output" "--deployment-dir-env に不正な環境変数名が指定されました: INVALID-NAME"
 
 tree_find_failure_output="$TEST_TMP/tree-find-failure.out"
 : > "$FAKE_DOCKER_CALLS"
@@ -155,7 +210,7 @@ if ! (
 fi
 unset FAKE_DOCKER_FIND_FAIL
 
-assert_contains "$tree_find_failure_output" "コンテナ内ディレクトリツリーを取得できませんでした (サービス: app, コンテナ: test-app-1)"
+assert_contains "$tree_find_failure_output" "コンテナ内ディレクトリツリーを取得できませんでした (サービス: app, コンテナ: test-app-1, ルート: /)"
 assert_contains "$tree_find_failure_output" "ビルドおよび確認が完了しました。"
 
 failure_output="$TEST_TMP/failure.out"
@@ -168,6 +223,7 @@ if (
     --compose-service app \
     --startup-service app \
     --env-list-limit 1 \
+    --report-dir "$TEST_TMP/failure-reports" \
     --suppress-removed-logs
 ) >"$failure_output" 2>&1; then
   cat "$failure_output" >&2
@@ -181,6 +237,29 @@ assert_contains "$failure_output" "WFLYSRV0021"
 assert_contains "$failure_output" "JNDI データソースエラー:"
 assert_contains "$failure_output" "WFLYJCA0031"
 assert_not_contains "$failure_output" "起動完了を確認しました"
+failure_report_files=("$TEST_TMP/failure-reports"/build_and_verify_*.txt)
+[ ${#failure_report_files[@]} -eq 1 ] && [ -f "${failure_report_files[0]}" ] \
+  || fail "expected one report for failed verification"
+assert_contains "${failure_report_files[0]}" "全体結果     : 失敗 (exit=1)"
+assert_contains "${failure_report_files[0]}" "結果          : 成功"
+
+build_failure_output="$TEST_TMP/build-failure.out"
+export FAKE_DOCKER_BUILD_FAIL="true"
+if (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh --report-dir "$TEST_TMP/build-failure-reports"
+) >"$build_failure_output" 2>&1; then
+  cat "$build_failure_output" >&2
+  fail "failed compose build unexpectedly returned zero"
+fi
+unset FAKE_DOCKER_BUILD_FAIL
+assert_contains "$build_failure_output" "compose build に失敗しました"
+build_failure_reports=("$TEST_TMP/build-failure-reports"/build_and_verify_*.txt)
+[ ${#build_failure_reports[@]} -eq 1 ] && [ -f "${build_failure_reports[0]}" ] \
+  || fail "expected one report for failed compose build"
+assert_contains "${build_failure_reports[0]}" "全体結果     : 失敗 (exit=1)"
+assert_contains "${build_failure_reports[0]}" "結果          : 失敗"
+assert_contains "${build_failure_reports[0]}" "対象コンテナが起動していないため取得していません。"
 
 invalid_keep_mode_output="$TEST_TMP/keep-mode-invalid.out"
 if (
@@ -444,4 +523,4 @@ assert_contains "$FAKE_DOCKER_CALLS" "network prune --force"
 assert_contains "$FAKE_DOCKER_CALLS" "system prune --all --volumes --force"
 assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
 
-printf 'PASS: build_and_verify.sh EAP 8.1 log, interaction, directory tree, and Docker cleanup scenarios\n'
+printf 'PASS: build_and_verify.sh EAP 8.1 log, interaction, deployment tree, full report, and Docker cleanup scenarios\n'

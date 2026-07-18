@@ -13,6 +13,7 @@
 `build_and_verify.sh` を提供します。ビルドに加えて、コンテナを起動して
 **jbosseap (WildFly/JBoss EAP) サーバーの起動確認**や、**指定 URL への HTTP 応答確認**、
 **JNDI データソースの成功名 / 作成失敗 warning・error の表示**、**コンテナ内ディレクトリツリーの表示**、
+**デプロイ済み Web アプリケーションの各ルート表示**、**全量テキストレポートの保存**、
 起動状態を維持した検証対象コンテナへの **bash 直接接続 / 対話式 HTTP 通信**を任意で行えます。
 `build_and_push.sh --build-only` はこのスクリプトへ委譲されます
 (後述の「ビルドのみの実行 / 起動・URL 確認」を参照)。
@@ -73,7 +74,10 @@
 | `--copy-file SRC:DEST_DIR` | ビルド前に `SRC` を `DEST_DIR` へコピーし、ビルド終了後に自動削除する。繰り返し指定で複数ファイルに対応 | (なし) |
 | `--env-list-limit N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後に表示する環境変数一覧の件数。各対象コンテナごとに先頭 `N` 件を表示し、既定は `all` | `all` |
 | `--env-list-file FILE` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後の環境変数一覧を `FILE` にも出力する。画面表示も継続 | (なし) |
-| `--directory-tree-depth N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。環境変数一覧の後に表示する対象コンテナ内ディレクトリツリーの最大深さ。`/` 直下を深さ `1` とし、通常ファイルは各ディレクトリ直下の拡張子別件数で表示する | `all` (最下層まで) |
+| `--directory-tree-depth N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。環境変数一覧後のコンテナ内ツリーと JBoss EAP デプロイ構造の最大深さ。各表示ルート直下を深さ `1` とする | `all` (最下層まで) |
+| `--directory-file-limit N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。各ディレクトリ直下が `N` ファイル以下なら全ファイル名、超過時は拡張子別件数へ切り替える。`all` は常に全ファイル名を表示する | `10` |
+| `--deployment-dir-env NAME` | **`build_and_verify.sh` / `--build-only` 委譲時**。ディレクトリの絶対パスを値に持つコンテナ環境変数名。繰り返しまたはカンマ区切りで複数指定でき、その配下を JBoss EAP デプロイ構造と併せて表示する | (なし) |
+| `--report-dir DIR` | **`build_and_verify.sh` / `--build-only` 委譲時**。ビルド結果、環境変数全件、コンテナ内ツリー、JBoss EAP デプロイ構造を、画面の制限にかかわらず全深度・全ファイル名で日時付きテキストへ保存する | (なし) |
 | `--jboss-password-param NAME` | JBoss のマスターパスワードを AWS パラメータストア (SSM Parameter Store) の指定キー `NAME` から取得し、環境変数経由の BuildKit シークレットとしてビルドに注入する (後述) | (なし) |
 | `--jboss-password VALUE` | JBoss のマスターパスワードを直接指定する (パラメータストアから取得しない場合)。`--jboss-password-param` とは同時指定不可 | (なし) |
 | `--jboss-password-env NAME` | シークレットの受け渡しに使う環境変数名。このオプションのみを指定した場合は、事前に export 済みの環境変数の値をそのまま使う | `JBOSS_MASTER_PASSWORD` |
@@ -297,14 +301,30 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 - 環境変数一覧の表示件数は `--env-list-limit` で制御できます。既定は `all`
   (全件表示) です。
 - `--env-list-file FILE` を指定すると、同じ一覧をファイルにも保存できます。
+- 環境変数名に `PASSWORD`、`TOKEN`、`SECRET`、`ACCESS_KEY` などを含む値は、
+  画面とファイルの双方で `[REDACTED]` とし、秘密情報を平文で残しません。
 - 環境変数一覧の後に、同じ対象コンテナの `/` を起点とした**ディレクトリツリー**を
-  表示します。通常ファイルの名前は表示せず、各ディレクトリ直下で最終拡張子ごとの
-  件数に集約します (`archive.tar.gz` は `.gz`、`.env` と末尾がドットの名前は
-  `(拡張子なし)`)。空ディレクトリもディレクトリ行として表示します。
-- `--directory-tree-depth N` では `/` 直下を深さ `1` として最大ディレクトリ深さを
-  制限できます。既定の `all` は末端のディレクトリまで探索します。通常ファイル以外の
-  特殊ファイルは集計せず、シンボリックリンクは循環を避けるため追跡しません。
-  コンテナ内で `find` を実行できない場合は警告し、ビルド・動作確認の成功状態は維持します。
+  表示します。各ディレクトリ直下の通常ファイルが既定の 10 件以下ならファイル名を
+  すべて表示し、10 件を超える場合は最終拡張子ごとの件数に切り替えます
+  (`archive.tar.gz` は `.gz`、`.env` と末尾がドットの名前は `(拡張子なし)`)。
+  切替値は `--directory-file-limit N`、常に全名を出す場合は
+  `--directory-file-limit all` で変更できます。
+- コンテナ全体のツリーに続けて、`*/standalone/deployments`、
+  展開済み Web アプリケーションの `WEB-INF` の親、Java クラスパスルートの
+  `WEB-INF/classes` を検出し、**JBoss EAP デプロイ構造**として表示します。
+  `--deployment-dir-env NAME` で、絶対ディレクトリパスを値に持つ環境変数も
+  同じ表示へ追加できます。複数の Web アプリケーションや環境変数指定にも対応します。
+- `--directory-tree-depth N` では各表示ルート直下を深さ `1` として最大深度を
+  制限できます。既定の `all` は末端まで探索します。空ディレクトリも表示しますが、
+  通常ファイル以外の特殊ファイルは集計せず、シンボリックリンクは循環を避けるため
+  追跡しません。コンテナ内で `find` を実行できない場合は警告し、
+  ビルド・動作確認の成功状態は維持します。
+- `--report-dir DIR` を指定すると、
+  `DIR/build_and_verify_<YYYYMMDDHHMMSS>.txt` へ全量レポートを保存します。
+  ビルドまたは動作確認が失敗した場合も、コンテナ停止前に取得できた情報を保存します。
+  レポートだけは画面用の件数・深度制限を適用せず、環境変数全件、全ディレクトリ深度、
+  全ファイル名を出力します。起動確認を伴わないビルドのみの場合、コンテナ由来の 3 セクションは
+  「未取得」と記録します。`--dry-run` ではファイルを作成せず、出力予定だけを表示します。
 
 ```bash
 # ビルド + jbosseap 起動確認
@@ -326,6 +346,16 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 # コンテナ内ディレクトリツリーを / 直下から 3 階層まで表示
 ./build_and_verify.sh --verify-startup \
     --directory-tree-depth 3
+
+# デプロイ構造へ APP_CONFIG_DIR 配下を追加し、5 件超のディレクトリは拡張子集計
+./build_and_verify.sh --verify-startup \
+    --deployment-dir-env APP_CONFIG_DIR \
+    --directory-tree-depth 4 --directory-file-limit 5
+
+# 画面は深さ 2・5 件で制限し、レポートは ./build-reports へ全量保存
+./build_and_verify.sh --verify-startup \
+    --directory-tree-depth 2 --directory-file-limit 5 \
+    --report-dir ./build-reports
 
 # app / batch / db をまとめてビルド・起動し、JBoss EAP の app だけを確認
 ./build_and_verify.sh --compose-service app,batch,db \

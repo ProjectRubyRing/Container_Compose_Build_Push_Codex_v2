@@ -21,8 +21,12 @@
 #                          warning / error により作成失敗した場合は
 #                          関連ログをデータソースエラーとして出力する。
 #   (5) ディレクトリツリー表示: 動作確認したコンテナのディレクトリを階層表示し、
-#                          通常ファイルは拡張子ごとの件数に集約して出力する。
-#   (6) --keep-container-mode: 起動確認後もコンテナを残し、検証対象へ直接
+#                          ファイル数に応じて名前または拡張子別件数を出力する。
+#   (6) デプロイ構造表示    : JBoss デプロイ先、Web ルート、Java クラスパスルート、
+#                          指定環境変数のディレクトリを検出して階層表示する。
+#   (7) 全量レポート        : ビルド結果と全量の環境変数・ツリー・デプロイ構造を
+#                          日時付きテキストファイルへ保存する。
+#   (8) --keep-container-mode: 起動確認後もコンテナを残し、検証対象へ直接
 #                          bash 接続するか、対話式の HTTP リクエストを実行する。
 #
 # --verify-startup / --verify-url いずれも指定しなければ、純粋にビルドのみを
@@ -58,6 +62,8 @@
 set -uo pipefail
 
 # ---- 既定値 -----------------------------------------------------------------
+RUN_STARTED_AT="$(date '+%Y-%m-%d %H:%M:%S')"
+RUN_TIMESTAMP="$(date '+%Y%m%d%H%M%S')"
 LOCAL_IMAGE="j1/base.local"       # compose build で生成されるローカルベースイメージ名
 COMPOSE_FILE="compose.yml"
 COMPOSE_SERVICES=()               # 指定時はそのサービスのみビルド/起動 (複数指定可、空なら全サービス)
@@ -158,6 +164,17 @@ declare -A BUILD_ARG_ENV_NAME_SET=()
 # ---- コンテナ内ディレクトリツリー出力 -----------------------------------------
 DIRECTORY_TREE_DEPTH="all"        # all: 最下層まで / 数値: / 直下を 1 とする最大ディレクトリ深さ
 DIRECTORY_TREE_DEPTH_SET="false"  # 深さが明示指定されたか (ビルドのみ実行時の警告用)
+DIRECTORY_FILE_LIMIT="10"         # 直下のファイル数がこの値以下なら名前、超過時は拡張子別件数
+DIRECTORY_FILE_LIMIT_SET="false"  # 表示上限が明示指定されたか (ビルドのみ実行時の警告用)
+DEPLOYMENT_DIR_ENVS=()            # ディレクトリパスを値に持つ環境変数名 (複数指定可)
+
+# ---- 全量ビルドレポート出力 --------------------------------------------------
+BUILD_REPORT_DIR=""               # 指定時は日時付きテキストレポートをこの配下へ出力
+BUILD_REPORT_DIR_SET="false"
+BUILD_REPORT_FILE=""
+BUILD_RESULT_STATUS="未実行"
+BUILD_RESULT_DETAIL=""
+BUILD_IMAGE_INFO=""
 
 # ---- ログ用ヘルパ -----------------------------------------------------------
 log()  { printf '[%s] %s\n'  "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
@@ -287,7 +304,19 @@ JBoss マスターパスワード (BuildKit シークレット):
   --directory-tree-depth N|all
                            環境変数一覧の後に表示するコンテナ内ディレクトリツリーの
                            最大深さ。/ 直下を深さ 1 とし、既定の all は最下層まで表示する。
-                           通常ファイルは各ディレクトリ直下の拡張子別件数で表示する
+                           JBoss EAP のデプロイ構造にも同じ深さを適用する
+  --directory-file-limit N|all
+                           各ディレクトリ直下の通常ファイルが N 件以下なら全ファイル名、
+                           N 件を超える場合は拡張子別件数を表示する (既定: 10)。
+                           all は件数にかかわらず全ファイル名を表示する
+  --deployment-dir-env NAME
+                           ディレクトリパスを値に持つコンテナ環境変数名。
+                           JBoss デプロイ先、Web アプリケーションルート、
+                           WEB-INF/classes と併せて、そのディレクトリ構造を表示する。
+                           繰り返し指定またはカンマ区切りで複数指定できる
+  --report-dir DIR         ビルド結果、環境変数一覧、コンテナ内ツリー、JBoss EAP
+                           デプロイ構造を DIR/build_and_verify_<日時>.txt へ保存する。
+                           保存内容は画面の制限にかかわらず全深度・全ファイル名となる
 
 URL 応答確認:
   --verify-url URL         起動確認後、この URL へ HTTP リクエストを送り応答を確認する。
@@ -350,6 +379,9 @@ while [ $# -gt 0 ]; do
     --env-list-limit)      ENV_LIST_LIMIT="$2"; shift 2 ;;
     --env-list-file)       ENV_LIST_FILE="$2"; shift 2 ;;
     --directory-tree-depth) DIRECTORY_TREE_DEPTH="$2"; DIRECTORY_TREE_DEPTH_SET="true"; shift 2 ;;
+    --directory-file-limit) DIRECTORY_FILE_LIMIT="$2"; DIRECTORY_FILE_LIMIT_SET="true"; shift 2 ;;
+    --deployment-dir-env) append_services DEPLOYMENT_DIR_ENVS "$2"; shift 2 ;;
+    --report-dir)          BUILD_REPORT_DIR="$2"; BUILD_REPORT_DIR_SET="true"; shift 2 ;;
     --verify-url)          VERIFY_URL="$2"; shift 2 ;;
     --expect-status)       EXPECT_STATUS="$2"; shift 2 ;;
     --url-method)          URL_METHOD="$2"; shift 2 ;;
@@ -385,6 +417,19 @@ if [ "$ENV_LIST_LIMIT" != "all" ]; then
 fi
 if [ "$DIRECTORY_TREE_DEPTH" != "all" ]; then
   validate_positive_integer "$DIRECTORY_TREE_DEPTH" "--directory-tree-depth" || exit 2
+fi
+if [ "$DIRECTORY_FILE_LIMIT" != "all" ]; then
+  validate_positive_integer "$DIRECTORY_FILE_LIMIT" "--directory-file-limit" || exit 2
+fi
+for _deployment_env in "${DEPLOYMENT_DIR_ENVS[@]}"; do
+  if ! printf '%s' "$_deployment_env" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    err "--deployment-dir-env に不正な環境変数名が指定されました: $_deployment_env"
+    exit 2
+  fi
+done
+if [ "$BUILD_REPORT_DIR_SET" = "true" ] && { [ -z "$BUILD_REPORT_DIR" ] || [ "$BUILD_REPORT_DIR" = "-" ]; }; then
+  err "--report-dir にはディレクトリパスを指定してください: $BUILD_REPORT_DIR"
+  exit 2
 fi
 
 case "$KEEP_CONTAINER_MODE" in
@@ -986,7 +1031,8 @@ append_env_names_by_type() {
 
 append_container_env_report() {
   local cid="$1" service_name="$2" container_name="$3" report_file="$4"
-  local line key value kv type_label shown_count total_count
+  local env_limit="${5:-$ENV_LIST_LIMIT}"
+  local line key value kv type_label shown_count total_count upper_key
   local -a sorted_names=()
   local -a compose_names=() build_arg_names=() internal_names=() other_names=()
   declare -A process_env_values=()
@@ -1030,8 +1076,8 @@ append_container_env_report() {
   mapfile -t sorted_names < <(printf '%s\n' "${!process_env_values[@]}" | sort)
   total_count="${#sorted_names[@]}"
   shown_count="$total_count"
-  if [ "$ENV_LIST_LIMIT" != "all" ] && [ "$ENV_LIST_LIMIT" -lt "$shown_count" ]; then
-    shown_count="$ENV_LIST_LIMIT"
+  if [ "$env_limit" != "all" ] && [ "$env_limit" -lt "$shown_count" ]; then
+    shown_count="$env_limit"
   fi
 
   printf '\n' >> "$report_file"
@@ -1042,10 +1088,21 @@ append_container_env_report() {
 
   shown_count=0
   for key in "${sorted_names[@]}"; do
-    if [ "$ENV_LIST_LIMIT" != "all" ] && [ "$shown_count" -ge "$ENV_LIST_LIMIT" ]; then
+    if [ "$env_limit" != "all" ] && [ "$shown_count" -ge "$env_limit" ]; then
       break
     fi
-    kv="${key}=${process_env_values[$key]}"
+    value="${process_env_values[$key]}"
+    upper_key="${key^^}"
+    # 一覧と全量レポートへ認証情報を平文で残さない。名前は分類確認のため維持する。
+    case "$upper_key" in
+      *PASSWORD*|*PASSWD*|*TOKEN*|*SECRET*|*PRIVATE_KEY*|*ACCESS_KEY*|*API_KEY*|*CREDENTIAL*)
+        value="[REDACTED]"
+        ;;
+    esac
+    if [ "$key" = "$JBOSS_PASSWORD_ENV" ]; then
+      value="[REDACTED]"
+    fi
+    kv="${key}=${value}"
     if [ -z "${container_env_values[$key]+_}" ]; then
       internal_names+=("$kv")
     elif [ -n "${compose_runtime_name_set[$key]+_}" ]; then
@@ -1109,19 +1166,31 @@ show_verified_container_envs() {
   rm -f "$env_report_tmp"
 }
 
-# 1 コンテナ分のディレクトリツリーを report_file へ追記する。コンテナ内に追加の
+# 1 コンテナ内の指定ルートを report_file へ追記する。コンテナ内に追加の
 # スクリプトや tree コマンドを要求しないよう、find の NUL 区切り出力をホスト側の
-# Bash で集計する。通常ファイルは名前を出さず、各親ディレクトリ直下の最終拡張子
-# (例: archive.tar.gz は .gz) ごとの件数だけを出力する。
+# Bash で集計する。直下のファイル数が file_limit 以下なら名前を、超える場合は
+# 最終拡張子 (例: archive.tar.gz は .gz) ごとの件数を出力する。
 append_container_directory_tree_report() {
   local cid="$1" service_name="$2" container_name="$3" report_file="$4"
+  local root_path="${5:-/}" report_title="${6:-コンテナ内ディレクトリツリー}"
+  local tree_depth="${7:-$DIRECTORY_TREE_DEPTH}" file_limit="${8:-$DIRECTORY_FILE_LIMIT}"
   local directory_list_tmp file_list_tmp directory_find_status=0 file_find_status=0
-  local file_max_depth directory file_path parent filename suffix extension key count
-  local relative display_name depth extension_list
-  local -a directory_find_args=(find /)
-  local -a file_find_args=(find /)
+  local file_max_depth directory file_path parent filename suffix extension key count file_count
+  local failure_message
+  local relative display_name depth extension_list filename_list
+  local -a directory_find_args=()
+  local -a file_find_args=()
   local -A extension_counts=()
   local -A directory_extension_lists=()
+  local -A directory_file_counts=()
+  local -A directory_filename_lists=()
+
+  # / 以外は末尾のスラッシュを除き、find の出力と親パスの比較を安定させる。
+  if [ "$root_path" != "/" ]; then
+    root_path="${root_path%/}"
+  fi
+  directory_find_args=(find "$root_path")
+  file_find_args=(find "$root_path")
 
   if ! directory_list_tmp="$(mktemp 2>/dev/null)"; then
     warn "ディレクトリツリー集計用の一時ファイルを作成できませんでした (サービス: ${service_name})。"
@@ -1133,9 +1202,9 @@ append_container_directory_tree_report() {
     return 0
   fi
 
-  if [ "$DIRECTORY_TREE_DEPTH" != "all" ]; then
-    directory_find_args+=(-maxdepth "$DIRECTORY_TREE_DEPTH")
-    file_max_depth="$((10#$DIRECTORY_TREE_DEPTH + 1))"
+  if [ "$tree_depth" != "all" ]; then
+    directory_find_args+=(-maxdepth "$tree_depth")
+    file_max_depth="$((10#$tree_depth + 1))"
     file_find_args+=(-maxdepth "$file_max_depth")
   fi
   directory_find_args+=(-type d -print0)
@@ -1145,7 +1214,8 @@ append_container_directory_tree_report() {
   docker exec "$cid" "${file_find_args[@]}" > "$file_list_tmp" 2>/dev/null || file_find_status=$?
 
   if [ ! -s "$directory_list_tmp" ]; then
-    warn "コンテナ内ディレクトリツリーを取得できませんでした (サービス: ${service_name}, コンテナ: ${container_name})。コンテナ内で find を実行できるか確認してください。"
+    failure_message="${report_title}を取得できませんでした (サービス: ${service_name}, コンテナ: ${container_name}, ルート: ${root_path})。コンテナ内のパスと find コマンドを確認してください。"
+    printf '\n[WARN] %s\n' "$failure_message" >> "$report_file"
     rm -f -- "$directory_list_tmp" "$file_list_tmp"
     return 0
   fi
@@ -1155,6 +1225,14 @@ append_container_directory_tree_report() {
     [ -n "$parent" ] || parent="/"
     filename="${file_path##*/}"
     extension="(拡張子なし)"
+    if [ -z "${directory_file_counts[$parent]+_}" ]; then
+      directory_file_counts["$parent"]=1
+      directory_filename_lists["$parent"]="$filename"
+    else
+      file_count="${directory_file_counts[$parent]}"
+      directory_file_counts["$parent"]=$((file_count + 1))
+      directory_filename_lists["$parent"]+=$'\n'"$filename"
+    fi
 
     # 先頭のドットだけを持つファイル (.env など) と末尾がドットのファイルは
     # 拡張子なしとして扱う。.env.local のように後続のドットがあれば .local とする。
@@ -1190,16 +1268,33 @@ append_container_directory_tree_report() {
 
   printf '\n' >> "$report_file"
   printf '───────────────────────────────────────────────────────────────────\n' >> "$report_file"
-  printf 'コンテナ内ディレクトリツリー (サービス: %s, コンテナ: %s, 最大深さ: %s)\n' \
-      "$service_name" "$container_name" "$DIRECTORY_TREE_DEPTH" >> "$report_file"
-  printf '通常ファイル: 各ディレクトリ直下の拡張子別件数 (ファイル名は非表示)\n' >> "$report_file"
+  if [ "$root_path" = "/" ] && [ "$report_title" = "コンテナ内ディレクトリツリー" ]; then
+    printf '%s (サービス: %s, コンテナ: %s, 最大深さ: %s)\n' \
+        "$report_title" "$service_name" "$container_name" "$tree_depth" >> "$report_file"
+  else
+    printf '%s (サービス: %s, コンテナ: %s, ルート: %s, 最大深さ: %s)\n' \
+        "$report_title" "$service_name" "$container_name" "$root_path" "$tree_depth" >> "$report_file"
+  fi
+  if [ "$file_limit" = "all" ]; then
+    printf '通常ファイル: 件数にかかわらず全ファイル名を表示\n' >> "$report_file"
+  else
+    printf '通常ファイル: 直下 %s 件以下は全ファイル名、超過時は拡張子別件数\n' \
+        "$file_limit" >> "$report_file"
+  fi
   printf '───────────────────────────────────────────────────────────────────\n' >> "$report_file"
   if [ "$directory_find_status" -ne 0 ] || [ "$file_find_status" -ne 0 ]; then
     printf '[WARN] 読み取り不能または実行中に消滅したパスを除く、取得可能な範囲を表示します。\n' >> "$report_file"
   fi
 
   while IFS= read -r -d '' directory; do
-    relative="${directory#/}"
+    if [ "$directory" = "$root_path" ]; then
+      relative=""
+    elif [ "$root_path" = "/" ]; then
+      relative="${directory#/}"
+    else
+      relative="${directory#"$root_path"}"
+      relative="${relative#/}"
+    fi
     depth=0
     while [ -n "$relative" ]; do
       depth=$((depth + 1))
@@ -1209,14 +1304,25 @@ append_container_directory_tree_report() {
       esac
     done
 
-    if [ "$directory" = "/" ]; then
-      display_name="/"
+    if [ "$directory" = "$root_path" ]; then
+      if [ "$root_path" = "/" ]; then
+        display_name="/"
+      else
+        display_name="${root_path##*/}/"
+      fi
     else
       display_name="${directory##*/}/"
     fi
     printf '%*s%s\n' "$((depth * 2))" "" "$display_name" >> "$report_file"
 
-    if [ -n "${directory_extension_lists[$directory]+_}" ]; then
+    file_count="${directory_file_counts[$directory]:-0}"
+    if [ "$file_count" -gt 0 ] \
+        && { [ "$file_limit" = "all" ] || [ "$file_count" -le "$file_limit" ]; }; then
+      filename_list="${directory_filename_lists[$directory]}"
+      while IFS= read -r filename; do
+        printf '%*s[ファイル] %s\n' "$(((depth + 1) * 2))" "" "$filename" >> "$report_file"
+      done < <(printf '%s\n' "$filename_list" | LC_ALL=C sort)
+    elif [ "$file_count" -gt 0 ] && [ -n "${directory_extension_lists[$directory]+_}" ]; then
       extension_list="${directory_extension_lists[$directory]}"
       while IFS= read -r extension; do
         [ -n "$extension" ] || continue
@@ -1265,6 +1371,145 @@ show_verified_container_directory_trees() {
   done < "$tree_report_tmp"
 
   rm -f -- "$tree_report_tmp"
+}
+
+# JBoss EAP のデプロイ先、展開済み Web ルート、Java クラスパスルート
+# (WEB-INF/classes)、および指定環境変数のディレクトリを検出して表示する。
+append_container_deployment_structure_report() {
+  local cid="$1" service_name="$2" container_name="$3" report_file="$4"
+  local tree_depth="${5:-$DIRECTORY_TREE_DEPTH}" file_limit="${6:-$DIRECTORY_FILE_LIMIT}"
+  local scan_tmp scan_status=0 directory label root_path key entry line env_name value
+  local deployment_found="false" web_root_found="false" class_root_found="false"
+  local -a root_entries=() notices=()
+  local -A seen_roots=() process_env_values=()
+
+  if ! scan_tmp="$(mktemp 2>/dev/null)"; then
+    warn "JBoss EAP デプロイ構造の検出用一時ファイルを作成できませんでした (サービス: ${service_name})。"
+    return 0
+  fi
+  docker exec "$cid" find / -type d -print0 > "$scan_tmp" 2>/dev/null || scan_status=$?
+
+  while IFS= read -r -d '' directory; do
+    label=""
+    root_path="$directory"
+    case "$directory" in
+      */standalone/deployments)
+        label="JBoss EAP デプロイ先"
+        deployment_found="true"
+        ;;
+      */WEB-INF/classes)
+        label="Java クラスパスルート"
+        class_root_found="true"
+        ;;
+      */WEB-INF)
+        label="Web アプリケーションルート"
+        root_path="${directory%/WEB-INF}"
+        [ -n "$root_path" ] || root_path="/"
+        web_root_found="true"
+        ;;
+    esac
+    [ -n "$label" ] || continue
+    key="${label}"$'\x1f'"${root_path}"
+    if [ -z "${seen_roots[$key]+_}" ]; then
+      seen_roots["$key"]=1
+      root_entries+=("$key")
+    fi
+  done < "$scan_tmp"
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key="${line%%=*}"
+    [ -n "$key" ] || continue
+    value=""
+    [ "$key" != "$line" ] && value="${line#*=}"
+    process_env_values["$key"]="$value"
+  done < <(collect_container_pid1_env "$cid")
+
+  for env_name in "${DEPLOYMENT_DIR_ENVS[@]}"; do
+    if [ -z "${process_env_values[$env_name]+_}" ] || [ -z "${process_env_values[$env_name]}" ]; then
+      notices+=("環境変数 ${env_name} は未設定または空です。")
+      continue
+    fi
+    root_path="${process_env_values[$env_name]}"
+    case "$root_path" in
+      /*) ;;
+      *)
+        notices+=("環境変数 ${env_name} の値は絶対パスではありません: ${root_path}")
+        continue
+        ;;
+    esac
+    [ "$root_path" = "/" ] || root_path="${root_path%/}"
+    label="環境変数 ${env_name}"
+    key="${label}"$'\x1f'"${root_path}"
+    if [ -z "${seen_roots[$key]+_}" ]; then
+      seen_roots["$key"]=1
+      root_entries+=("$key")
+    fi
+  done
+
+  printf '\n' >> "$report_file"
+  printf '===================================================================\n' >> "$report_file"
+  printf 'JBoss EAP デプロイ済み Web アプリケーションのディレクトリ構造\n' >> "$report_file"
+  printf '(サービス: %s, コンテナ: %s, 最大深さ: %s, ファイル表示上限: %s)\n' \
+      "$service_name" "$container_name" "$tree_depth" "$file_limit" >> "$report_file"
+  printf '===================================================================\n' >> "$report_file"
+  if [ "$scan_status" -ne 0 ]; then
+    printf '[WARN] 読み取り不能なパスを除く、検出可能な範囲を表示します。\n' >> "$report_file"
+  fi
+  [ "$deployment_found" = "true" ] || notices+=("JBoss EAP の standalone/deployments を検出できませんでした。")
+  [ "$web_root_found" = "true" ] || notices+=("展開済み Web アプリケーションルート (WEB-INF の親) を検出できませんでした。")
+  [ "$class_root_found" = "true" ] || notices+=("Java クラスパスルート (WEB-INF/classes) を検出できませんでした。")
+  for line in "${notices[@]}"; do
+    printf '[WARN] %s\n' "$line" >> "$report_file"
+  done
+
+  if [ ${#root_entries[@]} -eq 0 ]; then
+    printf '表示対象のディレクトリはありません。\n' >> "$report_file"
+  else
+    for entry in "${root_entries[@]}"; do
+      IFS=$'\x1f' read -r label root_path <<< "$entry"
+      append_container_directory_tree_report "$cid" "$service_name" "$container_name" \
+          "$report_file" "$root_path" "[${label}]" "$tree_depth" "$file_limit"
+    done
+  fi
+
+  rm -f -- "$scan_tmp"
+}
+
+show_verified_container_deployment_structures() {
+  [ "$DRY_RUN" = "true" ] && {
+    log "[DRY-RUN] コンテナ内ツリー後の JBoss EAP デプロイ構造出力をプレビューします (最大深さ: ${DIRECTORY_TREE_DEPTH}, ファイル表示上限: ${DIRECTORY_FILE_LIMIT})。"
+    return 0
+  }
+
+  local report_line cid service_name container_name deployment_report_tmp
+  local -a target_container_ids=()
+  mapfile -t target_container_ids < <(verification_target_container_ids)
+
+  if [ ${#target_container_ids[@]} -eq 0 ]; then
+    warn "JBoss EAP デプロイ構造を出力できませんでした。対象コンテナが見つかりません。"
+    return 0
+  fi
+  if ! deployment_report_tmp="$(mktemp 2>/dev/null)"; then
+    warn "JBoss EAP デプロイ構造出力用の一時ファイルを作成できませんでした。"
+    return 0
+  fi
+  : > "$deployment_report_tmp"
+
+  for cid in "${target_container_ids[@]}"; do
+    [ -n "$cid" ] || continue
+    service_name="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cid" 2>/dev/null || true)"
+    [ -n "$service_name" ] || service_name="(unknown)"
+    container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || printf '%s' "$cid")")"
+    append_container_deployment_structure_report "$cid" "$service_name" "$container_name" \
+        "$deployment_report_tmp"
+  done
+
+  diag ""
+  while IFS= read -r report_line; do
+    diag "$report_line"
+  done < "$deployment_report_tmp"
+  rm -f -- "$deployment_report_tmp"
 }
 
 # 対象コンテナがすべて実行中か確認する (途中停止 = 起動失敗の早期検知用)。
@@ -2244,12 +2489,137 @@ cleanup_all_docker_data() {
   return 0
 }
 
+# ---- 全量ビルドレポート ------------------------------------------------------
+# EXIT トラップからコンテナ停止前に呼び、画面表示の制限にかかわらず環境変数は
+# 全件、各ディレクトリは全深度・全ファイル名で保存する。
+write_build_report() {
+  local exit_status="$1" overall_status build_status report_dir report_base candidate
+  local counter=1 report_tmp report_finished_at cid service_name container_name
+  local -a target_container_ids=()
+
+  [ -n "$BUILD_REPORT_DIR" ] || return 0
+  if [ "$DRY_RUN" = "true" ]; then
+    log "[DRY-RUN] 全量ビルドレポートのファイル出力をスキップします: ${BUILD_REPORT_DIR}/build_and_verify_${RUN_TIMESTAMP}.txt"
+    return 0
+  fi
+  if ! mkdir -p -- "$BUILD_REPORT_DIR"; then
+    warn "全量ビルドレポートの出力先を作成できませんでした: $BUILD_REPORT_DIR"
+    return 1
+  fi
+
+  report_dir="${BUILD_REPORT_DIR%/}"
+  [ -n "$report_dir" ] || report_dir="/"
+  report_base="build_and_verify_${RUN_TIMESTAMP}"
+  candidate="${report_dir%/}/${report_base}.txt"
+  while [ -e "$candidate" ]; do
+    candidate="${report_dir%/}/${report_base}_${counter}.txt"
+    counter=$((counter + 1))
+  done
+  if ! report_tmp="$(mktemp "${report_dir%/}/.${report_base}.tmp.XXXXXX" 2>/dev/null)"; then
+    warn "全量ビルドレポート用の一時ファイルを作成できませんでした: $report_dir"
+    return 1
+  fi
+
+  if [ "$exit_status" -eq 0 ]; then
+    overall_status="成功"
+  else
+    overall_status="失敗 (exit=${exit_status})"
+  fi
+  build_status="$BUILD_RESULT_STATUS"
+  if [ "$exit_status" -ne 0 ] && [ "$build_status" = "実行中" ]; then
+    build_status="失敗 (ビルド処理中に中断)"
+  fi
+  report_finished_at="$(date '+%Y-%m-%d %H:%M:%S')"
+
+  if ! {
+    printf '===================================================================\n'
+    printf 'build_and_verify.sh 全量ビルドレポート\n'
+    printf '===================================================================\n'
+    printf '処理開始日時 : %s\n' "$RUN_STARTED_AT"
+    printf 'レポート日時 : %s\n' "$report_finished_at"
+    printf '全体結果     : %s\n' "$overall_status"
+    printf 'Compose 定義 : %s\n' "$COMPOSE_FILE"
+    if [ ${#COMPOSE_SERVICES[@]} -gt 0 ]; then
+      printf '対象サービス : %s\n' "${COMPOSE_SERVICES[*]}"
+    else
+      printf '対象サービス : 全サービス\n'
+    fi
+    printf '\n[1] ビルド結果\n'
+    printf '結果          : %s\n' "$build_status"
+    printf '詳細          : %s\n' "${BUILD_RESULT_DETAIL:-(なし)}"
+    printf 'イメージ      : %s\n' "${BUILD_IMAGE_INFO:-(未確認)}"
+    printf '保存ポリシー  : 環境変数は全件、ツリーは全深度・全ファイル名\n'
+  } > "$report_tmp"; then
+    rm -f -- "$report_tmp"
+    warn "全量ビルドレポートのヘッダーを書き込めませんでした: $candidate"
+    return 1
+  fi
+
+  if [ "$STARTED_CONTAINER" = "true" ]; then
+    mapfile -t target_container_ids < <(verification_target_container_ids)
+  fi
+  if [ ${#target_container_ids[@]} -eq 0 ]; then
+    {
+      printf '\n[2] 環境変数一覧 (全件)\n'
+      printf '対象コンテナが起動していないため取得していません。\n'
+      printf '\n[3] コンテナ内ディレクトリツリー (全深度・全ファイル名)\n'
+      printf '対象コンテナが起動していないため取得していません。\n'
+      printf '\n[4] JBoss EAP デプロイ構造 (全深度・全ファイル名)\n'
+      printf '対象コンテナが起動していないため取得していません。\n'
+    } >> "$report_tmp"
+  else
+    load_build_arg_env_name_set
+    printf '\n[2] 環境変数一覧 (全件)\n' >> "$report_tmp"
+    for cid in "${target_container_ids[@]}"; do
+      [ -n "$cid" ] || continue
+      service_name="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cid" 2>/dev/null || true)"
+      [ -n "$service_name" ] || service_name="(unknown)"
+      container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || printf '%s' "$cid")")"
+      append_container_env_report "$cid" "$service_name" "$container_name" "$report_tmp" "all"
+    done
+
+    printf '\n[3] コンテナ内ディレクトリツリー (全深度・全ファイル名)\n' >> "$report_tmp"
+    for cid in "${target_container_ids[@]}"; do
+      [ -n "$cid" ] || continue
+      service_name="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cid" 2>/dev/null || true)"
+      [ -n "$service_name" ] || service_name="(unknown)"
+      container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || printf '%s' "$cid")")"
+      append_container_directory_tree_report "$cid" "$service_name" "$container_name" \
+          "$report_tmp" "/" "コンテナ内ディレクトリツリー" "all" "all"
+    done
+
+    printf '\n[4] JBoss EAP デプロイ構造 (全深度・全ファイル名)\n' >> "$report_tmp"
+    for cid in "${target_container_ids[@]}"; do
+      [ -n "$cid" ] || continue
+      service_name="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cid" 2>/dev/null || true)"
+      [ -n "$service_name" ] || service_name="(unknown)"
+      container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null || printf '%s' "$cid")")"
+      append_container_deployment_structure_report "$cid" "$service_name" "$container_name" \
+          "$report_tmp" "all" "all"
+    done
+  fi
+
+  if ! mv -- "$report_tmp" "$candidate"; then
+    rm -f -- "$report_tmp"
+    warn "全量ビルドレポートを確定できませんでした: $candidate"
+    return 1
+  fi
+  BUILD_REPORT_FILE="$candidate"
+  log "全量ビルドレポートを出力しました: $BUILD_REPORT_FILE"
+  return 0
+}
+
 # ---- 後始末 (任意の Docker 完全クリーンアップ → 通常後始末) ----------------
 URL_BODY_FILE=""
 cleanup_all() {
   local original_status=$? cleanup_status=0
   # この関数内の exit で EXIT トラップが再帰しないよう、先に解除する。
   trap - EXIT
+
+  # コンテナの停止・Docker 全体削除より前に、取得可能な全量情報を保存する。
+  if ! write_build_report "$original_status"; then
+    cleanup_status=1
+  fi
 
   # 全体クリーンアップを先に実行し、削除前容量へ今回の Compose コンテナも含める。
   # 未承認・失敗時は、その後に従来どおり今回起動したコンテナだけを後始末する。
@@ -2309,23 +2679,31 @@ fi
 verify_local_image() {
   local image_info image_id image_created image_size
   if [ "$DRY_RUN" = "true" ]; then
+    BUILD_IMAGE_INFO="ローカルイメージ確認は DRY-RUN のため未実行: ${LOCAL_IMAGE}"
     log "[DRY-RUN] ローカルベースイメージの存在確認をスキップします: $LOCAL_IMAGE"
   elif ! image_info="$(docker image inspect --format '{{.Id}}|{{.Created}}|{{.Size}}' "$LOCAL_IMAGE" 2>/dev/null)"; then
+    BUILD_RESULT_STATUS="失敗"
+    BUILD_RESULT_DETAIL="compose build 後にローカルベースイメージを確認できませんでした。"
     err "ローカルベースイメージが見つかりません: $LOCAL_IMAGE (compose.yml の image 指定を確認してください)"
     return 1
   else
     IFS='|' read -r image_id image_created image_size <<< "$image_info"
+    BUILD_IMAGE_INFO="image=${LOCAL_IMAGE}, id=${image_id}, created=${image_created}, size=${image_size} bytes"
     log "ビルド結果: image=${LOCAL_IMAGE}, id=${image_id}, created=${image_created}, size=${image_size} bytes"
   fi
   return 0
 }
 
+BUILD_RESULT_STATUS="実行中"
+BUILD_RESULT_DETAIL="docker compose build を開始しました。"
 if [ ${#COMPOSE_SERVICES[@]} -gt 1 ]; then
   # ベースイメージを参照するサービス群と base を同時にビルドすると、base の
   # 完成前に他サービスのビルドが始まる可能性がある。そこで base を第 1 フェーズで
   # 必ず単独ビルドし、成功確認後に残りを 1 回の compose build で並列ビルドする。
   log "複数の compose サービスが指定されました。ベースサービス '${BASE_SERVICE}' を先行ビルドします ..."
   if ! run "${COMPOSE_CMD[@]}" ${COMPOSE_PARALLEL_OPTS[@]+"${COMPOSE_PARALLEL_OPTS[@]}"} -f "$COMPOSE_FILE" build ${COMPOSE_BUILD_PARALLEL_OPTS[@]+"${COMPOSE_BUILD_PARALLEL_OPTS[@]}"} ${BUILD_OPTS[@]+"${BUILD_OPTS[@]}"} "$BASE_SERVICE"; then
+    BUILD_RESULT_STATUS="失敗"
+    BUILD_RESULT_DETAIL="ベースサービス '${BASE_SERVICE}' の先行ビルドに失敗しました。"
     err "ベースサービス '${BASE_SERVICE}' の先行ビルドに失敗しました"
     exit 1
   fi
@@ -2344,6 +2722,8 @@ if [ ${#COMPOSE_SERVICES[@]} -gt 1 ]; then
   if [ ${#REMAINING_SERVICES[@]} -gt 0 ]; then
     log "ベースサービス以外をまとめて並列ビルドします (${COMPOSE_FILE}, 対象サービス: ${REMAINING_SERVICES[*]}) ..."
     if ! run "${COMPOSE_CMD[@]}" ${COMPOSE_PARALLEL_OPTS[@]+"${COMPOSE_PARALLEL_OPTS[@]}"} -f "$COMPOSE_FILE" build ${COMPOSE_BUILD_PARALLEL_OPTS[@]+"${COMPOSE_BUILD_PARALLEL_OPTS[@]}"} ${BUILD_OPTS[@]+"${BUILD_OPTS[@]}"} "${REMAINING_SERVICES[@]}"; then
+      BUILD_RESULT_STATUS="失敗"
+      BUILD_RESULT_DETAIL="ベースサービス以外の compose build に失敗しました: ${REMAINING_SERVICES[*]}"
       err "ベースサービス以外の compose build に失敗しました (対象サービス: ${REMAINING_SERVICES[*]})"
       exit 1
     fi
@@ -2358,6 +2738,8 @@ else
     log "docker compose build を実行します (${COMPOSE_FILE}, 全サービス) ..."
   fi
   if ! run "${COMPOSE_CMD[@]}" ${COMPOSE_PARALLEL_OPTS[@]+"${COMPOSE_PARALLEL_OPTS[@]}"} -f "$COMPOSE_FILE" build ${COMPOSE_BUILD_PARALLEL_OPTS[@]+"${COMPOSE_BUILD_PARALLEL_OPTS[@]}"} ${BUILD_OPTS[@]+"${BUILD_OPTS[@]}"} ${COMPOSE_SERVICES[@]+"${COMPOSE_SERVICES[@]}"}; then
+    BUILD_RESULT_STATUS="失敗"
+    BUILD_RESULT_DETAIL="compose build に失敗しました。"
     err "compose build に失敗しました"
     exit 1
   fi
@@ -2373,6 +2755,14 @@ else
   fi
 fi
 
+if [ "$DRY_RUN" = "true" ]; then
+  BUILD_RESULT_STATUS="DRY-RUN (未実行)"
+  BUILD_RESULT_DETAIL="ビルドコマンドのプレビューが完了しました。"
+else
+  BUILD_RESULT_STATUS="成功"
+  BUILD_RESULT_DETAIL="docker compose build とローカルイメージ確認が完了しました。"
+fi
+
 # ---- 起動確認が不要ならここで終了 -------------------------------------------
 if [ "$NEED_CONTAINER" != "true" ]; then
   if [ "$ENV_LIST_LIMIT" != "all" ] || [ -n "$ENV_LIST_FILE" ]; then
@@ -2380,6 +2770,12 @@ if [ "$NEED_CONTAINER" != "true" ]; then
   fi
   if [ "$DIRECTORY_TREE_DEPTH_SET" = "true" ]; then
     warn "コンテナ内ディレクトリツリーはコンテナ起動を伴う動作確認時のみ出力されます。--verify-startup または --verify-url を併用してください。"
+  fi
+  if [ "$DIRECTORY_FILE_LIMIT_SET" = "true" ] || [ ${#DEPLOYMENT_DIR_ENVS[@]} -gt 0 ]; then
+    warn "ファイル表示切替と JBoss EAP デプロイ構造はコンテナ起動を伴う動作確認時のみ画面表示されます。--verify-startup または --verify-url を併用してください。"
+  fi
+  if [ "$BUILD_REPORT_DIR_SET" = "true" ]; then
+    warn "全量レポートの環境変数・ツリー・JBoss EAP デプロイ構造は、コンテナ未起動のため未取得として記録します。"
   fi
   if [ "$DRY_RUN" = "true" ]; then
     log "[DRY-RUN] ビルドのみが完了しました (実際のビルドは行われていません)。"
@@ -2420,6 +2816,7 @@ fi
 
 show_verified_container_envs
 show_verified_container_directory_trees
+show_verified_container_deployment_structures
 
 if [ "$DRY_RUN" = "true" ]; then
   log "DRY-RUN が完了しました (実際の変更は行われていません)。"

@@ -33,6 +33,10 @@ if [ "${1:-}" = "compose" ]; then
       ;;
     build)
       printf '[fake-build] BUILDKIT_PROGRESS=%s\n' "${BUILDKIT_PROGRESS:-unset}"
+      if [ "${FAKE_DOCKER_BUILD_FAIL:-false}" = "true" ]; then
+        printf 'fake compose build failed\n' >&2
+        exit 42
+      fi
       ;;
     up)
       printf 'fake app container started\n'
@@ -214,13 +218,29 @@ if [ "${1:-}" = "inspect" ]; then
 fi
 
 emit_fake_find_entry() {
-  local entry_depth="$1" entry_path="$2"
+  local entry_path="$1" relative entry_depth=0
+  if [ "$fake_find_root" = "/" ]; then
+    relative="${entry_path#/}"
+  elif [ "$entry_path" = "$fake_find_root" ]; then
+    relative=""
+  elif [[ "$entry_path" == "$fake_find_root/"* ]]; then
+    relative="${entry_path#"$fake_find_root"/}"
+  else
+    return 0
+  fi
+  while [ -n "$relative" ]; do
+    entry_depth=$((entry_depth + 1))
+    case "$relative" in
+      */*) relative="${relative#*/}" ;;
+      *) relative="" ;;
+    esac
+  done
   if [ "$fake_find_max_depth" = "all" ] || [ "$entry_depth" -le "$fake_find_max_depth" ]; then
     printf '%s\0' "$entry_path"
   fi
 }
 
-if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ] && [ "${4:-}" = "/" ]; then
+if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
   if [ "${FAKE_DOCKER_FIND_FAIL:-false}" = "true" ]; then
     printf 'find: not found\n' >&2
     exit 127
@@ -228,6 +248,7 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ] && [ "${4:-}" = "/" ]; then
 
   fake_find_type=""
   fake_find_max_depth="all"
+  fake_find_root="${4:-/}"
   fake_find_next=""
   for arg in "$@"; do
     if [ "$fake_find_next" = "type" ]; then
@@ -248,28 +269,65 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ] && [ "${4:-}" = "/" ]; then
 
   case "$fake_find_type" in
     d)
-      emit_fake_find_entry 0 "/"
-      emit_fake_find_entry 1 "/app"
-      emit_fake_find_entry 2 "/app/config"
-      emit_fake_find_entry 1 "/empty"
+      fake_find_entries=(
+        "/"
+        "/app"
+        "/app/config"
+        "/app/config/nested"
+        "/empty"
+        "/opt"
+        "/opt/app"
+        "/opt/app/config"
+        "/opt/eap"
+        "/opt/eap/standalone"
+        "/opt/eap/standalone/deployments"
+        "/opt/eap/standalone/deployments/orders.war"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes"
+      )
       ;;
     f)
-      emit_fake_find_entry 1 "/LICENSE"
-      emit_fake_find_entry 2 "/app/application.jar"
-      emit_fake_find_entry 2 "/app/legacy.jar"
-      emit_fake_find_entry 2 "/app/archive.tar.gz"
-      emit_fake_find_entry 3 "/app/config/application.yaml"
-      emit_fake_find_entry 3 "/app/config/override.yaml"
-      emit_fake_find_entry 3 "/app/config/.env"
+      fake_find_entries=(
+        "/LICENSE"
+        "/app/application.jar"
+        "/app/legacy.jar"
+        "/app/archive.tar.gz"
+        "/app/config/application.yaml"
+        "/app/config/override.yaml"
+        "/app/config/.env"
+        "/app/config/nested/deep.json"
+        "/opt/app/config/override.properties"
+        "/opt/app/config/runtime.properties"
+        "/opt/eap/standalone/deployments/orders.war.deployed"
+        "/opt/eap/standalone/deployments/orders.war/index.jsp"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/web.xml"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order01.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order02.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order03.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order04.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order05.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order06.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order07.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order08.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order09.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order10.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order11.class"
+        "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/application.properties"
+      )
       ;;
     *)
       fail "$@"
       ;;
   esac
+  for fake_find_entry in "${fake_find_entries[@]}"; do
+    emit_fake_find_entry "$fake_find_entry"
+  done
   exit 0
 fi
 
 if [ "${1:-}" = "exec" ]; then
+  printf 'APP_CONFIG_DIR=/opt/app/config\n'
+  printf 'API_TOKEN=do-not-log-this-value\n'
   printf 'PATH=/usr/bin\n'
   exit 0
 fi
