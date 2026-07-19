@@ -160,7 +160,13 @@ DIRECTORY_TREE_PRUNE_PATHS=(
   /opt/jboss-eap/.galleon
   /opt/jboss-eap/modules/system/layers/base
   /proc
-  /share
+  /share/X11
+  /share/doc
+  /share/icons
+  /share/licenses
+  /share/man
+  /share/osinfo
+  /share/zoneinfo
   /sys
   /usr/lib
   /usr/lib64
