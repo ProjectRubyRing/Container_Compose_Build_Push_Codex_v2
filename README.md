@@ -12,7 +12,7 @@
 さらに、**ビルドのみを行う** (ECR へはプッシュしない) 専用スクリプトとして
 `build_and_verify.sh` を提供します。ビルドに加えて、コンテナを起動して
 **jbosseap (WildFly/JBoss EAP) サーバーの起動確認**や、**指定 URL への HTTP 応答確認**、
-**JNDI データソースの成功名 / 作成失敗 warning・error の表示**、**コンテナ内ディレクトリツリーの表示**、
+**同時に起動した Compose サービスのログ表示**、**コンテナ内ディレクトリツリーの表示**、
 **デプロイ済み Web アプリケーションの各ルート表示**、**全量テキストレポートの保存**、
 起動状態を維持した検証対象コンテナへの **bash 直接接続 / 対話式 HTTP 通信**を任意で行えます。
 `build_and_push.sh --build-only` はこのスクリプトへ委譲されます
@@ -66,7 +66,7 @@
 | `--output FILE` | imagedefinition の出力先 | `imagedefinition.json` |
 | `--dry-run` | 実際のビルド/ログイン/タグ付け/プッシュ/ファイル出力は行わず、実行内容のプレビューのみ表示する | `false` |
 | `--cleanup-all-docker-data` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。処理終了時に確認ダイアログを表示し、承認後、現在の Docker context の全コンテナ・全イメージ・全ローカルボリューム・未使用ネットワーク・現在の daemon で削除可能な全ビルドキャッシュを削除する | `false` |
-| `--startup-log-lines N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。コンテナ起動ログの画面表示行数。`N` は末尾 `N` 行、`all` は全行を表示する | `all` |
+| `--startup-log-lines N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。検証対象のコンテナ起動ログと、同時に起動した他 Compose サービスのログについて、サービスごとの画面表示行数を指定する。`N` は末尾 `N` 行、`all` は全行を表示する | `50` |
 | `--keep-container-mode bash\|http` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。JBoss EAP の起動確認後もコンテナを残し、検証対象へ `/bin/bash` で直接接続するか、対話式 HTTP 通信を行う。`--verify-startup` と `--keep-container` を暗黙に有効化する | (なし) |
 | `--jboss-context-root ROOT` | 対話式 HTTP モードの JBoss EAP コンテキストルートを明示する。未指定時は起動ログから検出する | (自動検出、検出不能時は `/`) |
 | `--jboss-http-port PORT` | 対話式 HTTP モードのコンテナ側 HTTP リスナーポートを明示する。Docker の公開ポートがあれば接続先へ自動変換する | (自動検出、検出不能時は `8080`) |
@@ -285,22 +285,16 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
   指定してください。
 - `--startup-timeout` (既定 120 秒) 以内に起動完了ログを検出できない場合、または
   コンテナが起動途中で停止した場合は、コンテナ起動ログを表示して失敗終了します。
-- 起動確認の成功時・失敗時とも、コンテナ起動ログは既定で全行を画面表示します。
-  `--startup-log-lines N` を指定すると末尾 `N` 行に制限でき、
+- 起動確認の成功時・失敗時とも、検証対象のコンテナ起動ログは既定で末尾 50 行を
+  画面表示します。`--startup-log-lines N` で末尾 `N` 行へ変更でき、
   `--startup-log-lines all` で全行表示を明示できます。
+- `--startup-service` で検証対象を限定した場合は、同じ `compose up` で現在起動している
+  他の Compose サービスも列挙し、検証対象の起動ログ領域の直後へサービス単位で
+  順次ログを表示します。各サービスにも `--startup-log-lines` の同じ上限を適用します。
 - 対話端末では JBoss EAP ログを、成功系は緑、重要なライフサイクルはシアン、
   warning は黄、error / 起動失敗は赤で表示します。リダイレクト時は ANSI 色コードを
   出力しません。`NO_COLOR` が設定されている場合は色を無効化し、必要な場合は
   `CLICOLOR_FORCE=1` で明示的に有効化できます。
-- 起動確認ログには、`WFLYJCA0001` と `WFLYJCA0098` から抽出した
-  **利用可能な JNDI データソース名**に加え、作成に失敗した場合の
-  **warning / error 関連ログ**も表示されます。Jakarta Connectors の
-  `WFLYJCA0002` やドライバー生成警告の `WFLYJCA0003` は成功扱いしません。
-- 起動確認時は `WFLYSRV0027` (開始)、`WFLYUT0021` (Web コンテキスト登録)、
-  `WFLYSRV0010` (完了) など、EAP 8.1 のアプリケーションデプロイ
-  ライフサイクルを表示します。正常時はアーカイブ名と Web コンテキスト、
-  rollback や scanner エラー時は該当エラーを分けて表示します。
-  表示行数は `--deploy-log-lines` で指定でき、既定は最新 20 行です。
 - 動作確認が成功した場合は、**対象コンテナで参照可能な環境変数一覧**も表示します。
   種別は `compose.yml environment` / `build引数` / `コンテナ内部処理` /
   `イメージ既定・その他` を出し分けます。
@@ -310,11 +304,15 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 - 環境変数名に `PASSWORD`、`TOKEN`、`SECRET`、`ACCESS_KEY` などを含む値は、
   画面とファイルの双方で `[REDACTED]` とし、秘密情報を平文で残しません。
 - 環境変数一覧の後に、同じ対象コンテナの `/` を起点とした**ディレクトリツリー**を
-  表示します。画面の既定表示はディレクトリのみで、通常ファイルは表示しません。
+  `├──`、`└──`、`│` の罫線記号を使ったツリー表記で表示します。画面の既定表示は
+  ディレクトリのみで、通常ファイルは表示しません。
   ファイル表示を有効にする場合は `--directory-file-limit N` を指定すると、各ディレクトリ
   直下が `N` 件以下なら全ファイル名、超過時は最終拡張子ごとの件数へ切り替えます
   (`archive.tar.gz` は `.gz`、`.env` と末尾がドットの名前は `(拡張子なし)`)。
   件数にかかわらず全ファイル名を出す場合は `--directory-file-limit all` を指定します。
+- コンテナ全体ツリーでは、`/afs`、`/aws`、`/etc`、`/opt/jboss-eap/.galleon`、
+  `/proc`、`/sys`、`/usr/lib` 自体は表示しますが、その配下は探索・表示しません。
+  この除外は画面表示と全量レポートの両方へ適用します。
 - コンテナ全体のツリーに続けて、`*/standalone/deployments`、
   展開済み Web アプリケーションの `WEB-INF` の親、Java クラスパスルートの
   `WEB-INF/classes` を検出し、**JBoss EAP デプロイ構造**として表示します。
@@ -329,8 +327,8 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 - `--report-dir DIR` を指定すると、
   `DIR/build_and_verify_<YYYYMMDDHHMMSS>.txt` へ全量レポートを保存します。
   ビルドまたは動作確認が失敗した場合も、コンテナ停止前に取得できた情報を保存します。
-  レポートだけは画面用の件数・深度制限を適用せず、環境変数全件、全ディレクトリ深度、
-  全ファイル名を出力します。起動確認を伴わないビルドのみの場合、コンテナ由来の 3 セクションは
+  レポートだけは画面用の件数・深度制限を適用せず、環境変数全件、除外対象を除く
+  全ディレクトリ深度、全ファイル名を出力します。起動確認を伴わないビルドのみの場合、コンテナ由来の 3 セクションは
   「未取得」と記録します。`--dry-run` ではファイルを作成せず、出力予定だけを表示します。
 
 ```bash
@@ -341,9 +339,9 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 ./build_and_verify.sh --verify-startup \
     --startup-log-pattern 'WFLYSRV0025' --startup-timeout 180
 
-# コンテナ起動ログを末尾 30 行、デプロイログを末尾 40 行に制限
+# 検証対象と同時起動 Compose サービスのログを、それぞれ末尾 30 行に制限
 ./build_and_verify.sh --verify-startup \
-    --startup-log-lines 30 --deploy-log-lines 40
+    --startup-log-lines 30
 
 # 環境変数一覧を 10 件に制限し、ファイルにも保存
 ./build_and_verify.sh --verify-startup \
@@ -373,7 +371,7 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
     --startup-service app --startup-service batch
 ```
 
-EAP 8.1 のログ解析、対話操作、ディレクトリツリー集計は、Docker / curl をモックした
+EAP 8.1 の起動ログ解析、同時起動サービスログ、対話操作、ディレクトリツリー集計は、Docker / curl をモックした
 回帰テストで確認できます。
 
 ```bash

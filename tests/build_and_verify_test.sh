@@ -90,30 +90,40 @@ assert_contains "$success_output" "BuildKit のビルドログ表示形式: plai
 assert_contains "$success_output" "[fake-build] BUILDKIT_PROGRESS=plain"
 assert_contains "$success_output" "ビルド結果: image=j1/base.local, id=sha256:test-image"
 assert_contains "$success_output" "jbosseap サーバーの起動完了を確認しました: サービス 'app'"
-assert_contains "$success_output" "コンテナ起動ログ (対象サービス: app, 全 15 行):"
+assert_contains "$success_output" "コンテナ起動ログ (対象サービス: app, 末尾 15/15 行 (指定上限: 50)):"
 assert_contains "$success_output" "APP000001: Orders application initialized"
 assert_contains "$success_output" $'\033[1;36mapp-1  | 09:17:43,001 INFO'
 assert_contains "$success_output" $'\033[1;32mapp-1  | 09:17:47,305 INFO'
 assert_contains "$success_output" "java:jboss/datasources/Orders#Primary"
 assert_contains "$success_output" "java:app/jdbc/ReportingDS"
-assert_contains "$success_output" "デプロイ済みアプリケーション:"
 assert_contains "$success_output" "orders.war"
-assert_contains "$success_output" "登録済み Web コンテキスト:"
 assert_contains "$success_output" "/orders"
 assert_occurrences "$success_output" "java:/JmsXA" 1
-assert_occurrences "$success_output" "old.war" 2
+assert_occurrences "$success_output" "old.war" 1
 assert_occurrences "$success_output" "/opt/eap/standalone/data/content/ab/cd/content" 1
+assert_not_contains "$success_output" "利用可能な JNDI データソース:"
+assert_not_contains "$success_output" "JNDI データソースエラー:"
+assert_not_contains "$success_output" "アプリケーションデプロイ結果ログ"
+assert_not_contains "$success_output" "デプロイ済みアプリケーション:"
+assert_not_contains "$success_output" "登録済み Web コンテキスト:"
+assert_not_contains "$success_output" "同時起動 Compose サービスログ"
 assert_contains "$success_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: 2)"
 assert_contains "$success_output" "通常ファイル: 直下 10 件以下は全ファイル名、超過時は拡張子別件数"
-assert_contains "$success_output" "  app/"
-assert_contains "$success_output" "    [ファイル] application.jar"
-assert_contains "$success_output" "    [ファイル] archive.tar.gz"
-assert_contains "$success_output" "    [ファイル] legacy.jar"
-assert_contains "$success_output" "    config/"
-assert_contains "$success_output" "      [ファイル] application.yaml"
-assert_contains "$success_output" "      [ファイル] .env"
-assert_contains "$success_output" "  [ファイル] LICENSE"
-assert_contains "$success_output" "  empty/"
+assert_contains "$success_output" "├── [ファイル] LICENSE"
+assert_contains "$success_output" "├── app/"
+assert_contains "$success_output" "│   ├── [ファイル] application.jar"
+assert_contains "$success_output" "│   ├── [ファイル] archive.tar.gz"
+assert_contains "$success_output" "│   ├── [ファイル] legacy.jar"
+assert_contains "$success_output" "│   └── config/"
+assert_contains "$success_output" "│       ├── [ファイル] application.yaml"
+assert_contains "$success_output" "│       ├── [ファイル] .env"
+assert_contains "$success_output" "├── afs/"
+assert_contains "$success_output" "├── aws/"
+assert_contains "$success_output" "├── etc/"
+assert_contains "$success_output" "├── proc/"
+assert_contains "$success_output" "├── sys/"
+assert_contains "$success_output" "    ├── lib/"
+assert_contains "$success_output" "├── empty/"
 assert_contains "$success_output" "JBoss EAP デプロイ済み Web アプリケーションのディレクトリ構造"
 assert_contains "$success_output" "[JBoss EAP デプロイ先]"
 assert_contains "$success_output" "[Web アプリケーションルート]"
@@ -129,9 +139,9 @@ assert_not_contains "$success_output" "deep.json"
 assert_before "$success_output" "環境変数一覧 (サービス: app" "コンテナ内ディレクトリツリー (サービス: app"
 assert_before "$success_output" "コンテナ内ディレクトリツリー (サービス: app" "JBoss EAP デプロイ済み Web アプリケーションのディレクトリ構造"
 assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ app'
-assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type d -print0"
-assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type f -print0"
-assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 3 -type f -print0"
+assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / .* -path /afs .* -path /usr/lib .* -prune -print0 -o -type d -print0'
+assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / .* -path /afs .* -path /usr/lib .* -prune -o -type f -print0'
+assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / -maxdepth 3 .* -type f -print0'
 
 report_files=("$TEST_TMP/reports"/build_and_verify_*.txt)
 [ ${#report_files[@]} -eq 1 ] && [ -f "${report_files[0]}" ] \
@@ -151,6 +161,18 @@ assert_contains "$full_report" "application.yaml"
 assert_contains "$full_report" "deep.json"
 assert_contains "$full_report" "Order01.class"
 assert_contains "$full_report" "Order11.class"
+assert_contains "$full_report" ".galleon/"
+assert_contains "$full_report" "zoneinfo.txt"
+assert_not_contains "$full_report" "cache/"
+assert_not_contains "$full_report" "hosts"
+assert_not_contains "$full_report" "ssl/"
+assert_not_contains "$full_report" "layers/"
+assert_not_contains "$full_report" "metadata.json"
+assert_not_contains "$full_report" "status"
+assert_not_contains "$full_report" "kernel/"
+assert_not_contains "$full_report" "jvm/"
+assert_not_contains "$full_report" "libexample.so"
+assert_not_contains "$full_report" "uevent_seqnum"
 
 startup_log_limit_output="$TEST_TMP/startup-log-limit.out"
 : > "$FAKE_DOCKER_CALLS"
@@ -175,6 +197,40 @@ assert_not_contains "$startup_log_limit_output" "WFLYSRV0049"
 assert_not_contains "$startup_log_limit_output" "APP000001"
 assert_not_contains "$startup_log_limit_output" $'\033['
 
+companion_logs_output="$TEST_TMP/companion-logs.out"
+: > "$FAKE_DOCKER_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="app db cache"
+if ! (
+  cd "$REPO_ROOT"
+  CLICOLOR_FORCE=0 bash ./build_and_verify.sh \
+    --verify-startup \
+    --compose-service app,db,cache \
+    --startup-service app \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$companion_logs_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES
+  cat "$companion_logs_output" >&2
+  fail "companion Compose service log scenario returned a non-zero status"
+fi
+unset FAKE_COMPOSE_PS_SERVICES
+
+assert_contains "$companion_logs_output" "コンテナ起動ログ (対象サービス: app, 末尾 15/15 行 (指定上限: 50)):"
+assert_contains "$companion_logs_output" "同時起動 Compose サービスログ (サービス: db, 末尾 50/52 行 (指定上限: 50)):"
+assert_contains "$companion_logs_output" "DB003: companion service log"
+assert_contains "$companion_logs_output" "DB052: companion service log"
+assert_not_contains "$companion_logs_output" "DB001: companion service log"
+assert_not_contains "$companion_logs_output" "DB002: companion service log"
+assert_contains "$companion_logs_output" "同時起動 Compose サービスログ (サービス: cache, 末尾 2/2 行 (指定上限: 50)):"
+assert_contains "$companion_logs_output" "CACHE002: accepting connections"
+assert_before "$companion_logs_output" "コンテナ起動ログ (対象サービス: app" "同時起動 Compose サービスログ (サービス: db"
+assert_before "$companion_logs_output" "同時起動 Compose サービスログ (サービス: db" "同時起動 Compose サービスログ (サービス: cache"
+assert_before "$companion_logs_output" "同時起動 Compose サービスログ (サービス: cache" "環境変数一覧 (サービス: app"
+assert_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml ps --services"
+assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ db'
+assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ cache'
+
 tree_depth_output="$TEST_TMP/tree-depth.out"
 : > "$FAKE_DOCKER_CALLS"
 if ! (
@@ -193,11 +249,16 @@ fi
 
 assert_contains "$tree_depth_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: 1)"
 assert_contains "$tree_depth_output" "通常ファイル: 表示しない"
-assert_contains "$tree_depth_output" "  app/"
-assert_contains "$tree_depth_output" "  empty/"
-assert_not_contains "$tree_depth_output" "    config/"
+assert_contains "$tree_depth_output" "├── app/"
+assert_contains "$tree_depth_output" "├── empty/"
+assert_contains "$tree_depth_output" "├── afs/"
+assert_contains "$tree_depth_output" "├── aws/"
+assert_contains "$tree_depth_output" "├── etc/"
+assert_contains "$tree_depth_output" "├── proc/"
+assert_contains "$tree_depth_output" "├── sys/"
+assert_not_contains "$tree_depth_output" "config/"
 assert_not_contains "$tree_depth_output" "[ファイル]"
-assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 1 -type d -print0"
+assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / -maxdepth 1 .* -prune -print0 -o -type d -print0'
 assert_not_contains "$FAKE_DOCKER_CALLS" "-type f -print0"
 
 invalid_startup_log_lines_output="$TEST_TMP/startup-log-lines-invalid.out"
@@ -279,13 +340,14 @@ if (
 fi
 
 assert_contains "$failure_output" "JBoss EAP 8.1 が正常起動しませんでした"
-assert_contains "$failure_output" "コンテナ起動ログ (対象サービス: app, 全 5 行):"
+assert_contains "$failure_output" "コンテナ起動ログ (対象サービス: app, 末尾 5/5 行 (指定上限: 50)):"
 assert_contains "$failure_output" $'\033[1;31mapp-1  | 09:18:00,100 ERROR'
 assert_contains "$failure_output" "WFLYSRV0026"
-assert_contains "$failure_output" "[デプロイエラー関連]"
 assert_contains "$failure_output" "WFLYSRV0021"
-assert_contains "$failure_output" "JNDI データソースエラー:"
 assert_contains "$failure_output" "WFLYJCA0031"
+assert_not_contains "$failure_output" "[デプロイエラー関連]"
+assert_not_contains "$failure_output" "JNDI データソースエラー:"
+assert_not_contains "$failure_output" "アプリケーションデプロイ結果ログ"
 assert_not_contains "$failure_output" "起動完了を確認しました"
 failure_report_files=("$TEST_TMP/failure-reports"/build_and_verify_*.txt)
 [ ${#failure_report_files[@]} -eq 1 ] && [ -f "${failure_report_files[0]}" ] \
@@ -573,4 +635,4 @@ assert_contains "$FAKE_DOCKER_CALLS" "network prune --force"
 assert_contains "$FAKE_DOCKER_CALLS" "system prune --all --volumes --force"
 assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
 
-printf 'PASS: build_and_verify.sh EAP 8.1 startup log display/color, interaction, deployment tree, full report, and Docker cleanup scenarios\n'
+printf 'PASS: build_and_verify.sh startup/companion log display, tree rendering/pruning, interaction, full report, and Docker cleanup scenarios\n'

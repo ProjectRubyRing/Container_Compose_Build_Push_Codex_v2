@@ -46,10 +46,26 @@ if [ "${1:-}" = "compose" ]; then
         printf 'FAKE_COMPOSE_LOG_FILE is not set\n' >&2
         exit 65
       fi
-      cat "$FAKE_COMPOSE_LOG_FILE"
+      last_arg="${!#}"
+      if [ "$last_arg" = "db" ]; then
+        for log_number in $(seq 1 52); do
+          printf 'db-1  | DB%03d: companion service log\n' "$log_number"
+        done
+      elif [ "$last_arg" = "cache" ]; then
+        printf 'cache-1  | CACHE001: cache ready\n'
+        printf 'cache-1  | CACHE002: accepting connections\n'
+      else
+        cat "$FAKE_COMPOSE_LOG_FILE"
+      fi
       ;;
     ps)
-      printf 'cid-app\n'
+      if [[ " $* " == *" --services "* ]]; then
+        for fake_service in ${FAKE_COMPOSE_PS_SERVICES:-app}; do
+          printf '%s\n' "$fake_service"
+        done
+      else
+        printf 'cid-app\n'
+      fi
       ;;
     down)
       printf 'fake app container removed\n'
@@ -218,7 +234,16 @@ if [ "${1:-}" = "inspect" ]; then
 fi
 
 emit_fake_find_entry() {
-  local entry_path="$1" relative entry_depth=0
+  local entry_path="$1" relative entry_depth=0 pruned_path
+  for pruned_path in "${fake_find_pruned_paths[@]}"; do
+    if [ "$entry_path" = "$pruned_path" ]; then
+      [ "$fake_find_type" = "d" ] || return 0
+      break
+    fi
+    if [[ "$entry_path" == "$pruned_path/"* ]]; then
+      return 0
+    fi
+  done
   if [ "$fake_find_root" = "/" ]; then
     relative="${entry_path#/}"
   elif [ "$entry_path" = "$fake_find_root" ]; then
@@ -250,6 +275,7 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
   fake_find_max_depth="all"
   fake_find_root="${4:-/}"
   fake_find_next=""
+  fake_find_pruned_paths=()
   for arg in "$@"; do
     if [ "$fake_find_next" = "type" ]; then
       fake_find_type="$arg"
@@ -261,9 +287,15 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
       fake_find_next=""
       continue
     fi
+    if [ "$fake_find_next" = "path" ]; then
+      fake_find_pruned_paths+=("$arg")
+      fake_find_next=""
+      continue
+    fi
     case "$arg" in
       -type) fake_find_next="type" ;;
       -maxdepth) fake_find_next="maxdepth" ;;
+      -path) fake_find_next="path" ;;
     esac
   done
 
@@ -271,10 +303,16 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
     d)
       fake_find_entries=(
         "/"
+        "/afs"
+        "/afs/cache"
         "/app"
         "/app/config"
         "/app/config/nested"
+        "/aws"
+        "/aws/runtime"
         "/empty"
+        "/etc"
+        "/etc/ssl"
         "/opt"
         "/opt/app"
         "/opt/app/config"
@@ -284,11 +322,23 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
         "/opt/eap/standalone/deployments/orders.war"
         "/opt/eap/standalone/deployments/orders.war/WEB-INF"
         "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes"
+        "/opt/jboss-eap"
+        "/opt/jboss-eap/.galleon"
+        "/opt/jboss-eap/.galleon/layers"
+        "/proc"
+        "/proc/1"
+        "/sys"
+        "/sys/kernel"
+        "/usr"
+        "/usr/lib"
+        "/usr/lib/jvm"
+        "/usr/share"
       )
       ;;
     f)
       fake_find_entries=(
         "/LICENSE"
+        "/afs/cache/index"
         "/app/application.jar"
         "/app/legacy.jar"
         "/app/archive.tar.gz"
@@ -296,6 +346,8 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
         "/app/config/override.yaml"
         "/app/config/.env"
         "/app/config/nested/deep.json"
+        "/aws/runtime/metadata.json"
+        "/etc/hosts"
         "/opt/app/config/override.properties"
         "/opt/app/config/runtime.properties"
         "/opt/eap/standalone/deployments/orders.war.deployed"
@@ -313,6 +365,11 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
         "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order10.class"
         "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/Order11.class"
         "/opt/eap/standalone/deployments/orders.war/WEB-INF/classes/application.properties"
+        "/opt/jboss-eap/.galleon/state"
+        "/proc/1/status"
+        "/sys/kernel/uevent_seqnum"
+        "/usr/lib/libexample.so"
+        "/usr/share/zoneinfo.txt"
       )
       ;;
     *)

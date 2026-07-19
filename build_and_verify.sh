@@ -12,21 +12,18 @@
 # ビルドに加えて、以下の確認・診断を任意で行える:
 #   (1) --verify-startup : ビルドしたイメージをコンテナとして起動し、
 #                          jbosseap (WildFly/JBoss EAP) サーバーの起動完了を
-#                          ログから確認し、起動ログ全体と重要ログの色分けを表示する。
+#                          ログから確認し、起動ログと重要ログの色分けを表示する。
 #   (2) --verify-url URL : 起動確認後、指定 URL へ HTTP リクエストを送り、
 #                          その応答 (ステータスコード/本文) を確認する。
-#   (3) デプロイログ確認    : 起動確認時に EAP 8.1 のデプロイライフサイクルを表示し、
-#                          成功時はアーカイブ名と Web コンテキストを出力する。
-#   (4) JNDI データソース確認: JNDI データソースのバインド成功名を表示し、
-#                          warning / error により作成失敗した場合は
-#                          関連ログをデータソースエラーとして出力する。
-#   (5) ディレクトリツリー表示: 動作確認したコンテナのディレクトリを階層表示する。
+#   (3) Compose サービスログ: 起動確認対象と同時に起動した他サービスのログを、
+#                          起動ログの直後へサービス単位で順次表示する。
+#   (4) ディレクトリツリー表示: 動作確認したコンテナのディレクトリを階層表示する。
 #                          通常ファイルはオプション指定時のみ出力する。
-#   (6) デプロイ構造表示    : JBoss デプロイ先、Web ルート、Java クラスパスルート、
+#   (5) デプロイ構造表示    : JBoss デプロイ先、Web ルート、Java クラスパスルート、
 #                          指定環境変数のディレクトリを検出して階層表示する。
-#   (7) 全量レポート        : ビルド結果と全量の環境変数・ツリー・デプロイ構造を
+#   (6) 全量レポート        : ビルド結果と全量の環境変数・ツリー・デプロイ構造を
 #                          日時付きテキストファイルへ保存する。
-#   (8) --keep-container-mode: 起動確認後もコンテナを残し、検証対象へ直接
+#   (7) --keep-container-mode: 起動確認後もコンテナを残し、検証対象へ直接
 #                          bash 接続するか、対話式の HTTP リクエストを実行する。
 #
 # --verify-startup / --verify-url いずれも指定しなければ、純粋にビルドのみを
@@ -101,22 +98,13 @@ STARTUP_INTERVAL="3"              # 起動確認ポーリング間隔 (秒)
 KEEP_CONTAINER="false"            # true: 確認後もコンテナを停止・削除せずに残す
 KEEP_CONTAINER_MODE=""            # bash/http: 確認後に実行する対話操作 (指定時はコンテナを残す)
 SUPPRESS_REMOVED_LOGS="false"     # true: compose down の Removed ログ等を抑制する
-SUPPRESS_STARTUP_LOGS="false"     # true: コンテナ起動ログの画面表示を抑制する
-STARTUP_LOG_LINES="all"           # all: 全行表示 / 数値: 末尾からの最大表示行数
+SUPPRESS_STARTUP_LOGS="false"     # true: 起動確認対象と同時起動サービスのログ表示を抑制する
+STARTUP_LOG_LINES="50"            # all: 全行表示 / 数値: 末尾からの最大表示行数
 # EAP 8.1 の起動、ドライバー、データソース、リスナー、デプロイ、終了状態を
 # 重要ログとして色分けする。
 STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV0049|WFLYJCA0009|WFLYJCA0018|WFLYJCA0001|WFLYJCA0098|WFLYDS0013|WFLYSRV0027|WFLYSRV0207|WFLYUT0006|WFLYUT0021|WFLYSRV0010|WFLYSRV0051|WFLYSRV0060|WFLYSRV0025|WFLYSRV0026|WFLYSRV0056'
 # 起動完了、ドライバー、データソース、HTTP リスナー、デプロイ完了は成功色で表示する。
 STARTUP_SUCCESS_LOG_PATTERN='WFLYJCA0018|WFLYJCA0001|WFLYJCA0098|WFLYUT0006|WFLYUT0021|WFLYSRV0010|WFLYSRV0025'
-
-# EAP 8.1 のデータソース成功ログは WFLYJCA0001。アプリケーション定義の
-# non-JTA データソースは WFLYJCA0098 で出力される。WFLYJCA0002 は Jakarta
-# Connectors、WFLYJCA0003 はドライバー生成失敗なので成功扱いしない。
-DATASOURCE_SUCCESS_LOG_PATTERN='WFLYJCA0001|WFLYJCA0098'
-DATASOURCE_ERROR_CODE_PATTERN='WFLYJCA(0003|0030|0031|0033|0041|0064|0072|0079|0086|0087)'
-DATASOURCE_ERROR_TARGET_PATTERN='datasource|data source|xa-data-source|java:(/|jboss/|global/|app/|module/|comp/)|jboss\.(data-source|xa-data-source|driver-demander)'
-DATASOURCE_ERROR_DETAIL_PATTERN='warn(ing)?|error|fail(ed|ure)?|exception|unable|missing|unavailable|not installed|invalid'
-DATASOURCE_ERROR_LOG_PATTERN="${DATASOURCE_ERROR_CODE_PATTERN}|IJ[0-9]{6}.*(${DATASOURCE_ERROR_DETAIL_PATTERN})|(${DATASOURCE_ERROR_TARGET_PATTERN}).*(${DATASOURCE_ERROR_DETAIL_PATTERN})|(${DATASOURCE_ERROR_DETAIL_PATTERN}).*(${DATASOURCE_ERROR_TARGET_PATTERN})"
 
 # ---- URL 応答確認 関連 ------------------------------------------------------
 VERIFY_URL=""                     # 空でなければ起動確認後にこの URL を呼び出して確認
@@ -145,14 +133,6 @@ HTTP_REQUEST_PATH=""
 HTTP_REQUEST_BODY=""
 HTTP_REQUEST_CONTENT_TYPE=""
 
-# ---- アプリケーションデプロイログ 関連 ---------------------------------------
-DEPLOY_LOG_LINES="20"             # デプロイ関連ログ出力行数
-# EAP 8.1 の標準的な正常経路は WFLYSRV0027 (開始) -> WFLYUT0021 (Web
-# コンテキスト登録) -> WFLYSRV0010 (完了)。WFLYSRV0009 は undeploy、
-# WFLYSRV0011 は redeploy rollback、WFLYDS0010 は不完全コピーなので除外する。
-DEPLOY_EVENT_LOG_PATTERN='WFLYSRV0027|WFLYSRV0207|WFLYUT0021|WFLYSRV0010|WFLYSRV0013|WFLYSRV0016'
-DEPLOY_ERROR_LOG_PATTERN='WFLYSRV00(11|12|14|15|21|22|26)|WFLYSRV0056|WFLYCTL(0013|0080|0180|0412)|WFLYDS00(03|05|08|09|10|11|12|14|16|17|34|42)|deployment.*(failed|failure|error|exception|rolled back)|failed.*deployment'
-
 # BuildKit の tty 表示はログ保存時に途中経過が上書きされるため、未指定時は
 # plain を使用して各ビルドステップの出力を確実に残す。利用者が環境変数を
 # 明示している場合はその値を尊重する。
@@ -170,6 +150,17 @@ DIRECTORY_TREE_DEPTH_SET="false"  # 深さが明示指定されたか (ビルド
 DIRECTORY_FILE_LIMIT="none"       # none: ファイル非表示 / all・数値: ファイル表示を有効化
 DIRECTORY_FILE_LIMIT_SET="false"  # 表示上限が明示指定されたか (ビルドのみ実行時の警告用)
 DEPLOYMENT_DIR_ENVS=()            # ディレクトリパスを値に持つ環境変数名 (複数指定可)
+# コンテナ全体ツリーでは、巨大・仮想・実行基盤固有の各ディレクトリ自体だけを
+# 表示し、その配下は探索しない。個別のデプロイ構造表示には適用しない。
+DIRECTORY_TREE_PRUNE_PATHS=(
+  /afs
+  /aws
+  /etc
+  /opt/jboss-eap/.galleon
+  /proc
+  /sys
+  /usr/lib
+)
 
 # ---- 全量ビルドレポート出力 --------------------------------------------------
 BUILD_REPORT_DIR=""               # 指定時は日時付きテキストレポートをこの配下へ出力
@@ -280,10 +271,11 @@ JBoss マスターパスワード (BuildKit シークレット):
   --startup-timeout SEC    起動完了を待つ最大秒数 (既定: 120)
   --startup-interval SEC   起動確認のポーリング間隔・秒 (既定: 3)
   --startup-log-lines N|all
-                           コンテナ起動ログの画面表示行数。N は末尾 N 行、all は
-                           全行を表示する (既定: all)
-  --suppress-startup-logs  コンテナ起動ログの表示を抑制する (起動判定は継続)
-  --deploy-log-lines N     デプロイ関連ログの最新 N 行 (既定: 20)
+                           起動確認対象と、同時に起動した他 Compose サービスの
+                           ログ画面表示行数。N は各サービスの末尾 N 行、all は
+                           全行を表示する (既定: 50)
+  --suppress-startup-logs  起動確認対象と同時起動サービスのログ表示を抑制する
+                           (起動判定は継続)
   --keep-container         確認後もコンテナを停止・削除せずに残す (調査用)
   --keep-container-mode MODE
                            起動確認後もコンテナを残し、検証対象コンテナで MODE の
@@ -376,7 +368,6 @@ while [ $# -gt 0 ]; do
     --startup-interval)    STARTUP_INTERVAL="$2"; shift 2 ;;
     --startup-log-lines)   STARTUP_LOG_LINES="$2"; shift 2 ;;
     --suppress-startup-logs) SUPPRESS_STARTUP_LOGS="true"; shift ;;
-    --deploy-log-lines)    DEPLOY_LOG_LINES="$2"; shift 2 ;;
     --keep-container)      KEEP_CONTAINER="true"; shift ;;
     --keep-container-mode) KEEP_CONTAINER_MODE="$2"; shift 2 ;;
     --jboss-context-root)  JBOSS_CONTEXT_ROOT="$2"; shift 2 ;;
@@ -417,7 +408,6 @@ validate_positive_integer() {
 if [ "$STARTUP_LOG_LINES" != "all" ]; then
   validate_positive_integer "$STARTUP_LOG_LINES" "--startup-log-lines" || exit 2
 fi
-validate_positive_integer "$DEPLOY_LOG_LINES" "--deploy-log-lines" || exit 2
 validate_positive_integer "$STARTUP_TIMEOUT" "--startup-timeout" || exit 2
 validate_positive_integer "$URL_TIMEOUT" "--url-timeout" || exit 2
 if [ "$ENV_LIST_LIMIT" != "all" ]; then
@@ -858,102 +848,90 @@ show_startup_logs() {
   diag "───────────────────────────────────────────────────────────────────"
 }
 
-# EAP 8.1 が出力する 2 種類のデータソースバインド成功メッセージから JNDI 名を
-# メッセージ境界に基づいて抽出する。JNDI 名の文字種を狭く決め打ちしない。
-extract_datasource_jndi_names() {
-  local logs="$1"
-  printf '%s\n' "$logs" \
-    | strip_ansi_codes \
-    | grep -E "$DATASOURCE_SUCCESS_LOG_PATTERN" \
-    | sed -nE \
-        -e 's/.*WFLYJCA0001:[[:space:]]*Bound data source[[:space:]]*\[([^]]+)\].*/\1/p' \
-        -e 's/.*WFLYJCA0098:[[:space:]]*Bound non-transactional data source:[[:space:]]*(java:[^[:space:]]+).*/\1/p' \
-    | sort -u
+# 現在起動している Compose サービス名を、Compose が返す順序を保って列挙する。
+# ps --services を利用できない旧実装では、明示された起動対象またはコンテナラベルへ
+# フォールバックする。
+compose_started_services() {
+  local services cid service_name
+  services="$("${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" ps --services 2>/dev/null || true)"
+  if [ -n "$services" ]; then
+    printf '%s\n' "$services" | awk 'NF && !seen[$0]++'
+    return 0
+  fi
+  if [ ${#COMPOSE_SERVICES[@]} -gt 0 ]; then
+    printf '%s\n' "${COMPOSE_SERVICES[@]}" | awk 'NF && !seen[$0]++'
+    return 0
+  fi
+  while IFS= read -r cid; do
+    [ -n "$cid" ] || continue
+    service_name="$(docker inspect -f '{{ index .Config.Labels "com.docker.compose.service" }}' "$cid" 2>/dev/null || true)"
+    [ -n "$service_name" ] && printf '%s\n' "$service_name"
+  done < <(compose_container_ids) | awk 'NF && !seen[$0]++'
 }
 
-# JNDI データソース関連の診断ログを表示する。
-# 引数には compose logs の全文をそのまま渡し、成功時は利用可能なデータソース名、
-# 失敗時は warning / error を伴うデータソース作成関連ログを抜粋して出力する。
-show_datasource_diagnostics_from_logs() {
-  local logs ds_names ds_errors normalized_logs
-  logs="$1"
-  normalized_logs="$(printf '%s\n' "$logs" | strip_ansi_codes)"
-  ds_names="$(extract_datasource_jndi_names "$normalized_logs" || true)"
-  ds_errors="$(
-    printf '%s\n' "$normalized_logs" \
-      | grep -Ei "$DATASOURCE_ERROR_LOG_PATTERN" \
-      | tail -n "$DEPLOY_LOG_LINES" || true
-  )"
-  diag "───────────────────────────────────────────────────────────────────"
-  if [ -n "$ds_names" ]; then
-    diag "利用可能な JNDI データソース:"
-    printf '%s\n' "$ds_names" | sed 's/^/  /' >&2
+# 起動確認対象以外で、同じ compose up により現在起動しているサービスのログを、
+# 起動確認ログと同じ行数設定でサービス単位に順次表示する。
+show_companion_service_logs() {
+  local allow_suppression="${1:-true}"
+  local svc logs normalized_logs selected total_count shown_count display_range
+  local -a started_services=()
+  local -A verification_services=()
+
+  if [ "$allow_suppression" = "true" ] && [ "$SUPPRESS_STARTUP_LOGS" = "true" ]; then
+    return 0
+  fi
+
+  mapfile -t started_services < <(compose_started_services)
+  if [ ${#STARTUP_SERVICES[@]} -gt 0 ]; then
+    for svc in "${STARTUP_SERVICES[@]}"; do
+      verification_services["$svc"]=1
+    done
+  elif [ ${#COMPOSE_SERVICES[@]} -gt 0 ]; then
+    for svc in "${COMPOSE_SERVICES[@]}"; do
+      verification_services["$svc"]=1
+    done
   else
-    diag "利用可能な JNDI データソース: (ログから検出されませんでした)"
+    # 起動対象を限定していない場合、起動確認ログには全サービスが含まれている。
+    for svc in "${started_services[@]}"; do
+      verification_services["$svc"]=1
+    done
   fi
-  if [ -n "$ds_errors" ]; then
+
+  for svc in "${started_services[@]}"; do
+    [ -n "$svc" ] || continue
+    [ -z "${verification_services[$svc]+_}" ] || continue
+    logs="$(compose_logs "$svc")"
+    normalized_logs="$(printf '%s\n' "$logs" | strip_ansi_codes)"
+    if [ -n "$normalized_logs" ]; then
+      total_count="$(printf '%s\n' "$normalized_logs" | awk 'END { print NR }')"
+    else
+      total_count=0
+    fi
+    if [ "$STARTUP_LOG_LINES" = "all" ]; then
+      selected="$normalized_logs"
+      shown_count="$total_count"
+      display_range="全 ${total_count} 行"
+    else
+      selected="$(printf '%s\n' "$normalized_logs" | tail -n "$STARTUP_LOG_LINES")"
+      if [ -n "$selected" ]; then
+        shown_count="$(printf '%s\n' "$selected" | awk 'END { print NR }')"
+      else
+        shown_count=0
+      fi
+      display_range="末尾 ${shown_count}/${total_count} 行 (指定上限: ${STARTUP_LOG_LINES})"
+    fi
+
     diag ""
-    diag "JNDI データソースエラー:"
-    printf '%s\n' "$ds_errors" >&2
-  fi
-  diag "───────────────────────────────────────────────────────────────────"
-}
-
-show_deploy_logs() {
-  local logs="$1" target_desc="$2"
-  local normalized_logs event_logs error_logs deployed_names web_contexts
-  normalized_logs="$(printf '%s\n' "$logs" | strip_ansi_codes)"
-  event_logs="$(printf '%s\n' "$normalized_logs" | grep -E "$DEPLOY_EVENT_LOG_PATTERN" | tail -n "$DEPLOY_LOG_LINES" || true)"
-  error_logs="$(printf '%s\n' "$normalized_logs" | grep -Ei "$DEPLOY_ERROR_LOG_PATTERN" | tail -n "$DEPLOY_LOG_LINES" || true)"
-  deployed_names="$(
-    printf '%s\n' "$normalized_logs" \
-      | sed -nE \
-          -e 's/.*WFLYSRV0010:[[:space:]]*Deployed "([^"]+)".*/\1/p' \
-          -e 's/.*WFLYSRV0013:[[:space:]]*Redeployed "([^"]+)".*/\1/p' \
-          -e 's/.*WFLYSRV0016:.*with deployment "([^"]+)".*/\1/p' \
-      | sort -u
-  )"
-  web_contexts="$(
-    printf '%s\n' "$normalized_logs" \
-      | sed -nE "s/.*WFLYUT0021:[[:space:]]*Registered web context:[[:space:]]*'?([^'[:space:]]+)'?.*/\1/p" \
-      | sort -u
-  )"
-
-  diag ""
-  diag "───────────────────────────────────────────────────────────────────"
-  diag "アプリケーションデプロイ結果ログ (${target_desc}, 最新 ${DEPLOY_LOG_LINES} 行):"
-  diag "───────────────────────────────────────────────────────────────────"
-  if [ -n "$deployed_names" ]; then
-    diag "デプロイ済みアプリケーション:"
-    printf '%s\n' "$deployed_names" | sed 's/^/  /' >&2
-  else
-    diag "デプロイ済みアプリケーション: (WFLYSRV0010/0013/0016 を検出できませんでした)"
-  fi
-  if [ -n "$web_contexts" ]; then
-    diag "登録済み Web コンテキスト:"
-    printf '%s\n' "$web_contexts" | sed 's/^/  /' >&2
-  fi
-  if [ -n "$event_logs" ]; then
-    diag ""
-    diag "[EAP 8.1 デプロイライフサイクル]"
-    printf '%s\n' "$event_logs" >&2
-  else
-    diag "[EAP 8.1 デプロイライフサイクル] 該当ログなし"
-  fi
-
-  if [ -n "$error_logs" ]; then
-    diag ""
-    diag "[デプロイエラー関連]"
-    printf '%s\n' "$error_logs" >&2
-  fi
-  diag "───────────────────────────────────────────────────────────────────"
-}
-
-show_eap_diagnostics_from_logs() {
-  local logs="$1" target_desc="$2"
-  show_startup_logs "$logs" "$target_desc"
-  show_datasource_diagnostics_from_logs "$logs"
-  show_deploy_logs "$logs" "$target_desc"
+    diag "───────────────────────────────────────────────────────────────────"
+    diag "同時起動 Compose サービスログ (サービス: ${svc}, ${display_range}):"
+    diag "───────────────────────────────────────────────────────────────────"
+    if [ -n "$selected" ]; then
+      printf '%s\n' "$selected" >&2
+    else
+      diag "表示対象のサービスログはありません。"
+    fi
+    diag "───────────────────────────────────────────────────────────────────"
+  done
 }
 
 normalize_container_name() {
@@ -1244,7 +1222,8 @@ show_verified_container_envs() {
 
 # 1 コンテナ内の指定ルートを report_file へ追記する。コンテナ内に追加の
 # スクリプトや tree コマンドを要求しないよう、find の NUL 区切り出力をホスト側の
-# Bash で集計する。file_limit が none の場合はディレクトリだけを取得する。
+# Bash で集計し、tree コマンドと同じ罫線記号で表示する。file_limit が none の
+# 場合はディレクトリだけを取得する。
 # それ以外は、直下のファイル数が file_limit 以下なら名前を、超える場合は
 # 最終拡張子 (例: archive.tar.gz は .gz) ごとの件数を出力する。
 append_container_directory_tree_report() {
@@ -1254,13 +1233,19 @@ append_container_directory_tree_report() {
   local directory_list_tmp file_list_tmp directory_find_status=0 file_find_status=0
   local file_max_depth directory file_path parent filename suffix extension key count file_count
   local failure_message
-  local relative display_name depth extension_list filename_list
+  local display_name extension_list filename_list ancestor prefix connector is_last index
   local -a directory_find_args=()
   local -a file_find_args=()
+  local -a directory_paths=()
+  local -a ancestor_chain=()
+  local -a leaf_entries=()
   local -A extension_counts=()
   local -A directory_extension_lists=()
   local -A directory_file_counts=()
   local -A directory_filename_lists=()
+  local -A directory_child_counts=()
+  local -A last_child_directory=()
+  local -A directory_is_last=()
 
   # / 以外は末尾のスラッシュを除き、find の出力と親パスの比較を安定させる。
   if [ "$root_path" != "/" ]; then
@@ -1286,6 +1271,31 @@ append_container_directory_tree_report() {
     if [ "$file_limit" != "none" ]; then
       file_max_depth="$((10#$tree_depth + 1))"
       file_find_args+=(-maxdepth "$file_max_depth")
+    fi
+  fi
+
+  # コンテナ全体のツリーでは、巨大な仮想ファイルシステム等を find 自体で枝刈り
+  # する。対象ディレクトリは 1 ノードとして出力し、その配下だけを探索しない。
+  if [ "$root_path" = "/" ] && [ "$report_title" = "コンテナ内ディレクトリツリー" ]; then
+    directory_find_args+=("(")
+    if [ "$file_limit" != "none" ]; then
+      file_find_args+=("(")
+    fi
+    for index in "${!DIRECTORY_TREE_PRUNE_PATHS[@]}"; do
+      if [ "$index" -gt 0 ]; then
+        directory_find_args+=(-o)
+        if [ "$file_limit" != "none" ]; then
+          file_find_args+=(-o)
+        fi
+      fi
+      directory_find_args+=(-path "${DIRECTORY_TREE_PRUNE_PATHS[$index]}")
+      if [ "$file_limit" != "none" ]; then
+        file_find_args+=(-path "${DIRECTORY_TREE_PRUNE_PATHS[$index]}")
+      fi
+    done
+    directory_find_args+=(")" -prune -print0 -o)
+    if [ "$file_limit" != "none" ]; then
+      file_find_args+=(")" -prune -o)
     fi
   fi
   directory_find_args+=(-type d -print0)
@@ -1351,6 +1361,31 @@ append_container_directory_tree_report() {
     fi
   done < "$file_list_tmp"
 
+  # 親ごとの最後の子ディレクトリを先に確定し、├── / └── と祖先の │ を
+  # 正しく選択できるようにする。ファイル行は各親の先頭、ディレクトリ行は
+  # その後に出すため、最後の子ディレクトリが親全体の最後のノードになる。
+  mapfile -d '' -t directory_paths < <(LC_ALL=C sort -z "$directory_list_tmp")
+  for directory in "${directory_paths[@]}"; do
+    [ "$directory" = "$root_path" ] && continue
+    parent="${directory%/*}"
+    [ -n "$parent" ] || parent="/"
+    directory_child_counts["$parent"]=$((${directory_child_counts[$parent]:-0} + 1))
+    last_child_directory["$parent"]="$directory"
+  done
+  for directory in "${directory_paths[@]}"; do
+    if [ "$directory" = "$root_path" ]; then
+      directory_is_last["$directory"]="true"
+      continue
+    fi
+    parent="${directory%/*}"
+    [ -n "$parent" ] || parent="/"
+    if [ "${last_child_directory[$parent]:-}" = "$directory" ]; then
+      directory_is_last["$directory"]="true"
+    else
+      directory_is_last["$directory"]="false"
+    fi
+  done
+
   printf '\n' >> "$report_file"
   printf '───────────────────────────────────────────────────────────────────\n' >> "$report_file"
   if [ "$root_path" = "/" ] && [ "$report_title" = "コンテナ内ディレクトリツリー" ]; then
@@ -1373,52 +1408,84 @@ append_container_directory_tree_report() {
     printf '[WARN] 読み取り不能または実行中に消滅したパスを除く、取得可能な範囲を表示します。\n' >> "$report_file"
   fi
 
-  while IFS= read -r -d '' directory; do
-    if [ "$directory" = "$root_path" ]; then
-      relative=""
-    elif [ "$root_path" = "/" ]; then
-      relative="${directory#/}"
-    else
-      relative="${directory#"$root_path"}"
-      relative="${relative#/}"
-    fi
-    depth=0
-    while [ -n "$relative" ]; do
-      depth=$((depth + 1))
-      case "$relative" in
-        */*) relative="${relative#*/}" ;;
-        *) relative="" ;;
-      esac
-    done
-
+  for directory in "${directory_paths[@]}"; do
     if [ "$directory" = "$root_path" ]; then
       if [ "$root_path" = "/" ]; then
         display_name="/"
       else
         display_name="${root_path##*/}/"
       fi
+      printf '%s\n' "$display_name" >> "$report_file"
     else
       display_name="${directory##*/}/"
+      parent="${directory%/*}"
+      [ -n "$parent" ] || parent="/"
+      ancestor_chain=()
+      ancestor="$parent"
+      while [ "$ancestor" != "$root_path" ]; do
+        ancestor_chain=("$ancestor" "${ancestor_chain[@]}")
+        ancestor="${ancestor%/*}"
+        [ -n "$ancestor" ] || ancestor="/"
+      done
+      prefix=""
+      for ancestor in "${ancestor_chain[@]}"; do
+        if [ "${directory_is_last[$ancestor]:-false}" = "true" ]; then
+          prefix+="    "
+        else
+          prefix+="│   "
+        fi
+      done
+      is_last="${directory_is_last[$directory]:-false}"
+      if [ "$is_last" = "true" ]; then
+        connector="└── "
+      else
+        connector="├── "
+      fi
+      printf '%s%s%s\n' "$prefix" "$connector" "$display_name" >> "$report_file"
     fi
-    printf '%*s%s\n' "$((depth * 2))" "" "$display_name" >> "$report_file"
 
+    leaf_entries=()
     file_count="${directory_file_counts[$directory]:-0}"
     if [ "$file_count" -gt 0 ] \
         && { [ "$file_limit" = "all" ] || [ "$file_count" -le "$file_limit" ]; }; then
       filename_list="${directory_filename_lists[$directory]}"
       while IFS= read -r filename; do
-        printf '%*s[ファイル] %s\n' "$(((depth + 1) * 2))" "" "$filename" >> "$report_file"
+        leaf_entries+=("[ファイル] ${filename}")
       done < <(printf '%s\n' "$filename_list" | LC_ALL=C sort)
     elif [ "$file_count" -gt 0 ] && [ -n "${directory_extension_lists[$directory]+_}" ]; then
       extension_list="${directory_extension_lists[$directory]}"
       while IFS= read -r extension; do
         [ -n "$extension" ] || continue
         key="${directory}"$'\x1f'"${extension}"
-        printf '%*s[ファイル] %s: %s 件\n' "$(((depth + 1) * 2))" "" \
-            "$extension" "${extension_counts[$key]}" >> "$report_file"
+        leaf_entries+=("[ファイル] ${extension}: ${extension_counts[$key]} 件")
       done < <(printf '%s\n' "$extension_list" | LC_ALL=C sort)
     fi
-  done < <(LC_ALL=C sort -z "$directory_list_tmp")
+
+    for index in "${!leaf_entries[@]}"; do
+      ancestor_chain=()
+      ancestor="$directory"
+      while [ "$ancestor" != "$root_path" ]; do
+        ancestor_chain=("$ancestor" "${ancestor_chain[@]}")
+        ancestor="${ancestor%/*}"
+        [ -n "$ancestor" ] || ancestor="/"
+      done
+      prefix=""
+      for ancestor in "${ancestor_chain[@]}"; do
+        if [ "${directory_is_last[$ancestor]:-false}" = "true" ]; then
+          prefix+="    "
+        else
+          prefix+="│   "
+        fi
+      done
+      if [ "$index" -eq "$((${#leaf_entries[@]} - 1))" ] \
+          && [ "${directory_child_counts[$directory]:-0}" -eq 0 ]; then
+        connector="└── "
+      else
+        connector="├── "
+      fi
+      printf '%s%s%s\n' "$prefix" "$connector" "${leaf_entries[$index]}" >> "$report_file"
+    done
+  done
 
   rm -f -- "$directory_list_tmp" "$file_list_tmp"
 }
@@ -1700,13 +1767,14 @@ wait_for_startup() {
           return 1
         elif grep -qE "$STARTUP_LOG_PATTERN" <<< "$normalized_logs"; then
           log "jbosseap サーバーの起動完了を確認しました: サービス '${svc}'"
-          show_eap_diagnostics_from_logs "$normalized_logs" "対象サービス: ${svc}"
+          show_startup_logs "$normalized_logs" "対象サービス: ${svc}"
         else
           remaining+=("$svc")
         fi
       done
       pending=(${remaining[@]+"${remaining[@]}"})
       if [ ${#pending[@]} -eq 0 ]; then
+        show_companion_service_logs
         log "指定した全サービスの起動完了を確認しました。"
         return 0
       fi
@@ -1721,7 +1789,8 @@ wait_for_startup() {
         return 1
       elif grep -qE "$STARTUP_LOG_PATTERN" <<< "$normalized_logs"; then
         log "jbosseap サーバーの起動完了を確認しました。"
-        show_eap_diagnostics_from_logs "$normalized_logs" "全対象サービス"
+        show_startup_logs "$normalized_logs" "全対象サービス"
+        show_companion_service_logs
         return 0
       fi
     fi
@@ -1745,13 +1814,12 @@ wait_for_startup() {
   done
 }
 
-# 取得済みスナップショットを使い、失敗時の起動ログと EAP 診断を同じ時点の内容で
-# 表示する。失敗原因を隠さないよう、--suppress-startup-logs 指定時もログを表示する。
+# 取得済みスナップショットを使い、失敗時の起動ログと同時起動サービスログを表示する。
+# 失敗原因を隠さないよう、--suppress-startup-logs 指定時もログを表示する。
 dump_startup_logs_from_snapshot() {
   local logs="$1" target_desc="$2"
   show_startup_logs "$logs" "$target_desc" "false"
-  show_deploy_logs "$logs" "$target_desc"
-  show_datasource_diagnostics_from_logs "$logs"
+  show_companion_service_logs "false"
 }
 
 # 失敗時に設定行数分のコンテナ起動ログを出力する (原因調査用)。
