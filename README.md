@@ -66,6 +66,7 @@
 | `--output FILE` | imagedefinition の出力先 | `imagedefinition.json` |
 | `--dry-run` | 実際のビルド/ログイン/タグ付け/プッシュ/ファイル出力は行わず、実行内容のプレビューのみ表示する | `false` |
 | `--cleanup-all-docker-data` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。処理終了時に確認ダイアログを表示し、承認後、現在の Docker context の全コンテナ・全イメージ・全ローカルボリューム・未使用ネットワーク・現在の daemon で削除可能な全ビルドキャッシュを削除する | `false` |
+| `--startup-log-lines N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。コンテナ起動ログの画面表示行数。`N` は末尾 `N` 行、`all` は全行を表示する | `all` |
 | `--keep-container-mode bash\|http` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。JBoss EAP の起動確認後もコンテナを残し、検証対象へ `/bin/bash` で直接接続するか、対話式 HTTP 通信を行う。`--verify-startup` と `--keep-container` を暗黙に有効化する | (なし) |
 | `--jboss-context-root ROOT` | 対話式 HTTP モードの JBoss EAP コンテキストルートを明示する。未指定時は起動ログから検出する | (自動検出、検出不能時は `/`) |
 | `--jboss-http-port PORT` | 対話式 HTTP モードのコンテナ側 HTTP リスナーポートを明示する。Docker の公開ポートがあれば接続先へ自動変換する | (自動検出、検出不能時は `8080`) |
@@ -75,7 +76,7 @@
 | `--env-list-limit N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後に表示する環境変数一覧の件数。各対象コンテナごとに先頭 `N` 件を表示し、既定は `all` | `all` |
 | `--env-list-file FILE` | **`build_and_verify.sh` / `--build-only` 委譲時**。動作確認成功後の環境変数一覧を `FILE` にも出力する。画面表示も継続 | (なし) |
 | `--directory-tree-depth N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。環境変数一覧後のコンテナ内ツリーと JBoss EAP デプロイ構造の最大深さ。各表示ルート直下を深さ `1` とする | `all` (最下層まで) |
-| `--directory-file-limit N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。各ディレクトリ直下が `N` ファイル以下なら全ファイル名、超過時は拡張子別件数へ切り替える。`all` は常に全ファイル名を表示する | `10` |
+| `--directory-file-limit N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時**。通常ファイルの画面表示を有効にする。各ディレクトリ直下が `N` ファイル以下なら全ファイル名、超過時は拡張子別件数へ切り替える。`all` は常に全ファイル名を表示する | 未指定時はファイル非表示 |
 | `--deployment-dir-env NAME` | **`build_and_verify.sh` / `--build-only` 委譲時**。ディレクトリの絶対パスを値に持つコンテナ環境変数名。繰り返しまたはカンマ区切りで複数指定でき、その配下を JBoss EAP デプロイ構造と併せて表示する | (なし) |
 | `--report-dir DIR` | **`build_and_verify.sh` / `--build-only` 委譲時**。ビルド結果、環境変数全件、コンテナ内ツリー、JBoss EAP デプロイ構造を、画面の制限にかかわらず全深度・全ファイル名で日時付きテキストへ保存する | (なし) |
 | `--jboss-password-param NAME` | JBoss のマスターパスワードを AWS パラメータストア (SSM Parameter Store) の指定キー `NAME` から取得し、環境変数経由の BuildKit シークレットとしてビルドに注入する (後述) | (なし) |
@@ -283,9 +284,14 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
   なります。`--compose-service` と併用する場合は、その起動対象に含まれるサービスを
   指定してください。
 - `--startup-timeout` (既定 120 秒) 以内に起動完了ログを検出できない場合、または
-  コンテナが起動途中で停止した場合は、コンテナログの末尾を表示して失敗終了します。
-- 起動確認が成功した場合も、重要な起動ログを表示します。表示行数は
-  `--startup-log-lines` で指定でき、既定は最新 20 行です。
+  コンテナが起動途中で停止した場合は、コンテナ起動ログを表示して失敗終了します。
+- 起動確認の成功時・失敗時とも、コンテナ起動ログは既定で全行を画面表示します。
+  `--startup-log-lines N` を指定すると末尾 `N` 行に制限でき、
+  `--startup-log-lines all` で全行表示を明示できます。
+- 対話端末では JBoss EAP ログを、成功系は緑、重要なライフサイクルはシアン、
+  warning は黄、error / 起動失敗は赤で表示します。リダイレクト時は ANSI 色コードを
+  出力しません。`NO_COLOR` が設定されている場合は色を無効化し、必要な場合は
+  `CLICOLOR_FORCE=1` で明示的に有効化できます。
 - 起動確認ログには、`WFLYJCA0001` と `WFLYJCA0098` から抽出した
   **利用可能な JNDI データソース名**に加え、作成に失敗した場合の
   **warning / error 関連ログ**も表示されます。Jakarta Connectors の
@@ -304,11 +310,11 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 - 環境変数名に `PASSWORD`、`TOKEN`、`SECRET`、`ACCESS_KEY` などを含む値は、
   画面とファイルの双方で `[REDACTED]` とし、秘密情報を平文で残しません。
 - 環境変数一覧の後に、同じ対象コンテナの `/` を起点とした**ディレクトリツリー**を
-  表示します。各ディレクトリ直下の通常ファイルが既定の 10 件以下ならファイル名を
-  すべて表示し、10 件を超える場合は最終拡張子ごとの件数に切り替えます
+  表示します。画面の既定表示はディレクトリのみで、通常ファイルは表示しません。
+  ファイル表示を有効にする場合は `--directory-file-limit N` を指定すると、各ディレクトリ
+  直下が `N` 件以下なら全ファイル名、超過時は最終拡張子ごとの件数へ切り替えます
   (`archive.tar.gz` は `.gz`、`.env` と末尾がドットの名前は `(拡張子なし)`)。
-  切替値は `--directory-file-limit N`、常に全名を出す場合は
-  `--directory-file-limit all` で変更できます。
+  件数にかかわらず全ファイル名を出す場合は `--directory-file-limit all` を指定します。
 - コンテナ全体のツリーに続けて、`*/standalone/deployments`、
   展開済み Web アプリケーションの `WEB-INF` の親、Java クラスパスルートの
   `WEB-INF/classes` を検出し、**JBoss EAP デプロイ構造**として表示します。
@@ -316,8 +322,9 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
   同じ表示へ追加できます。複数の Web アプリケーションや環境変数指定にも対応します。
 - `--directory-tree-depth N` では各表示ルート直下を深さ `1` として最大深度を
   制限できます。既定の `all` は末端まで探索します。空ディレクトリも表示しますが、
-  通常ファイル以外の特殊ファイルは集計せず、シンボリックリンクは循環を避けるため
-  追跡しません。コンテナ内で `find` を実行できない場合は警告し、
+  ファイル表示を有効にした場合も通常ファイル以外の特殊ファイルは集計せず、
+  シンボリックリンクは循環を避けるため追跡しません。コンテナ内で `find` を
+  実行できない場合は警告し、
   ビルド・動作確認の成功状態は維持します。
 - `--report-dir DIR` を指定すると、
   `DIR/build_and_verify_<YYYYMMDDHHMMSS>.txt` へ全量レポートを保存します。
@@ -334,7 +341,7 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
 ./build_and_verify.sh --verify-startup \
     --startup-log-pattern 'WFLYSRV0025' --startup-timeout 180
 
-# 起動重要ログ / デプロイログの表示行数を指定
+# コンテナ起動ログを末尾 30 行、デプロイログを末尾 40 行に制限
 ./build_and_verify.sh --verify-startup \
     --startup-log-lines 30 --deploy-log-lines 40
 
@@ -343,7 +350,7 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
     --env-list-limit 10 \
     --env-list-file ./logs/container_envs.txt
 
-# コンテナ内ディレクトリツリーを / 直下から 3 階層まで表示
+# コンテナ内ディレクトリツリーをディレクトリだけ / 直下から 3 階層まで表示
 ./build_and_verify.sh --verify-startup \
     --directory-tree-depth 3
 

@@ -12,7 +12,7 @@
 # ビルドに加えて、以下の確認・診断を任意で行える:
 #   (1) --verify-startup : ビルドしたイメージをコンテナとして起動し、
 #                          jbosseap (WildFly/JBoss EAP) サーバーの起動完了を
-#                          ログから確認し、成功時に重要ログを表示する。
+#                          ログから確認し、起動ログ全体と重要ログの色分けを表示する。
 #   (2) --verify-url URL : 起動確認後、指定 URL へ HTTP リクエストを送り、
 #                          その応答 (ステータスコード/本文) を確認する。
 #   (3) デプロイログ確認    : 起動確認時に EAP 8.1 のデプロイライフサイクルを表示し、
@@ -20,8 +20,8 @@
 #   (4) JNDI データソース確認: JNDI データソースのバインド成功名を表示し、
 #                          warning / error により作成失敗した場合は
 #                          関連ログをデータソースエラーとして出力する。
-#   (5) ディレクトリツリー表示: 動作確認したコンテナのディレクトリを階層表示し、
-#                          ファイル数に応じて名前または拡張子別件数を出力する。
+#   (5) ディレクトリツリー表示: 動作確認したコンテナのディレクトリを階層表示する。
+#                          通常ファイルはオプション指定時のみ出力する。
 #   (6) デプロイ構造表示    : JBoss デプロイ先、Web ルート、Java クラスパスルート、
 #                          指定環境変数のディレクトリを検出して階層表示する。
 #   (7) 全量レポート        : ビルド結果と全量の環境変数・ツリー・デプロイ構造を
@@ -101,10 +101,13 @@ STARTUP_INTERVAL="3"              # 起動確認ポーリング間隔 (秒)
 KEEP_CONTAINER="false"            # true: 確認後もコンテナを停止・削除せずに残す
 KEEP_CONTAINER_MODE=""            # bash/http: 確認後に実行する対話操作 (指定時はコンテナを残す)
 SUPPRESS_REMOVED_LOGS="false"     # true: compose down の Removed ログ等を抑制する
-SUPPRESS_STARTUP_LOGS="false"     # true: 起動確認 重要ログの表示を抑制する
-STARTUP_IMPORTANT_LOG_LINES="20"  # 起動成功時に表示する重要ログの行数
-# EAP 8.1 の起動、ドライバー、データソース、リスナー、デプロイ、終了状態を表示する。
+SUPPRESS_STARTUP_LOGS="false"     # true: コンテナ起動ログの画面表示を抑制する
+STARTUP_LOG_LINES="all"           # all: 全行表示 / 数値: 末尾からの最大表示行数
+# EAP 8.1 の起動、ドライバー、データソース、リスナー、デプロイ、終了状態を
+# 重要ログとして色分けする。
 STARTUP_IMPORTANT_LOG_PATTERN='WFLYSRV0049|WFLYJCA0009|WFLYJCA0018|WFLYJCA0001|WFLYJCA0098|WFLYDS0013|WFLYSRV0027|WFLYSRV0207|WFLYUT0006|WFLYUT0021|WFLYSRV0010|WFLYSRV0051|WFLYSRV0060|WFLYSRV0025|WFLYSRV0026|WFLYSRV0056'
+# 起動完了、ドライバー、データソース、HTTP リスナー、デプロイ完了は成功色で表示する。
+STARTUP_SUCCESS_LOG_PATTERN='WFLYJCA0018|WFLYJCA0001|WFLYJCA0098|WFLYUT0006|WFLYUT0021|WFLYSRV0010|WFLYSRV0025'
 
 # EAP 8.1 のデータソース成功ログは WFLYJCA0001。アプリケーション定義の
 # non-JTA データソースは WFLYJCA0098 で出力される。WFLYJCA0002 は Jakarta
@@ -164,7 +167,7 @@ declare -A BUILD_ARG_ENV_NAME_SET=()
 # ---- コンテナ内ディレクトリツリー出力 -----------------------------------------
 DIRECTORY_TREE_DEPTH="all"        # all: 最下層まで / 数値: / 直下を 1 とする最大ディレクトリ深さ
 DIRECTORY_TREE_DEPTH_SET="false"  # 深さが明示指定されたか (ビルドのみ実行時の警告用)
-DIRECTORY_FILE_LIMIT="10"         # 直下のファイル数がこの値以下なら名前、超過時は拡張子別件数
+DIRECTORY_FILE_LIMIT="none"       # none: ファイル非表示 / all・数値: ファイル表示を有効化
 DIRECTORY_FILE_LIMIT_SET="false"  # 表示上限が明示指定されたか (ビルドのみ実行時の警告用)
 DEPLOYMENT_DIR_ENVS=()            # ディレクトリパスを値に持つ環境変数名 (複数指定可)
 
@@ -276,8 +279,10 @@ JBoss マスターパスワード (BuildKit シークレット):
                            既定: 'WFLYSRV0025:' (WFLYSRV0026 は失敗扱い)
   --startup-timeout SEC    起動完了を待つ最大秒数 (既定: 120)
   --startup-interval SEC   起動確認のポーリング間隔・秒 (既定: 3)
-  --startup-log-lines N    起動成功時に表示する重要ログの最新 N 行 (既定: 20)
-  --suppress-startup-logs  起動確認 重要ログの表示を抑制する (起動判定は継続)
+  --startup-log-lines N|all
+                           コンテナ起動ログの画面表示行数。N は末尾 N 行、all は
+                           全行を表示する (既定: all)
+  --suppress-startup-logs  コンテナ起動ログの表示を抑制する (起動判定は継続)
   --deploy-log-lines N     デプロイ関連ログの最新 N 行 (既定: 20)
   --keep-container         確認後もコンテナを停止・削除せずに残す (調査用)
   --keep-container-mode MODE
@@ -306,9 +311,10 @@ JBoss マスターパスワード (BuildKit シークレット):
                            最大深さ。/ 直下を深さ 1 とし、既定の all は最下層まで表示する。
                            JBoss EAP のデプロイ構造にも同じ深さを適用する
   --directory-file-limit N|all
-                           各ディレクトリ直下の通常ファイルが N 件以下なら全ファイル名、
-                           N 件を超える場合は拡張子別件数を表示する (既定: 10)。
-                           all は件数にかかわらず全ファイル名を表示する
+                           通常ファイルの画面表示を有効にする。各ディレクトリ直下が
+                           N 件以下なら全ファイル名、超過時は拡張子別件数を表示する。
+                           all は件数にかかわらず全ファイル名を表示する。
+                           未指定時はディレクトリのみを表示する
   --deployment-dir-env NAME
                            ディレクトリパスを値に持つコンテナ環境変数名。
                            JBoss デプロイ先、Web アプリケーションルート、
@@ -368,7 +374,7 @@ while [ $# -gt 0 ]; do
     --startup-log-pattern) STARTUP_LOG_PATTERN="$2"; shift 2 ;;
     --startup-timeout)     STARTUP_TIMEOUT="$2"; shift 2 ;;
     --startup-interval)    STARTUP_INTERVAL="$2"; shift 2 ;;
-    --startup-log-lines)   STARTUP_IMPORTANT_LOG_LINES="$2"; shift 2 ;;
+    --startup-log-lines)   STARTUP_LOG_LINES="$2"; shift 2 ;;
     --suppress-startup-logs) SUPPRESS_STARTUP_LOGS="true"; shift ;;
     --deploy-log-lines)    DEPLOY_LOG_LINES="$2"; shift 2 ;;
     --keep-container)      KEEP_CONTAINER="true"; shift ;;
@@ -408,7 +414,9 @@ validate_positive_integer() {
   return 0
 }
 
-validate_positive_integer "$STARTUP_IMPORTANT_LOG_LINES" "--startup-log-lines" || exit 2
+if [ "$STARTUP_LOG_LINES" != "all" ]; then
+  validate_positive_integer "$STARTUP_LOG_LINES" "--startup-log-lines" || exit 2
+fi
 validate_positive_integer "$DEPLOY_LOG_LINES" "--deploy-log-lines" || exit 2
 validate_positive_integer "$STARTUP_TIMEOUT" "--startup-timeout" || exit 2
 validate_positive_integer "$URL_TIMEOUT" "--url-timeout" || exit 2
@@ -418,7 +426,7 @@ fi
 if [ "$DIRECTORY_TREE_DEPTH" != "all" ]; then
   validate_positive_integer "$DIRECTORY_TREE_DEPTH" "--directory-tree-depth" || exit 2
 fi
-if [ "$DIRECTORY_FILE_LIMIT" != "all" ]; then
+if [ "$DIRECTORY_FILE_LIMIT_SET" = "true" ] && [ "$DIRECTORY_FILE_LIMIT" != "all" ]; then
   validate_positive_integer "$DIRECTORY_FILE_LIMIT" "--directory-file-limit" || exit 2
 fi
 for _deployment_env in "${DEPLOYMENT_DIR_ENVS[@]}"; do
@@ -763,23 +771,91 @@ strip_ansi_codes() {
   LC_ALL=C sed $'s/\033\[[0-9;]*m//g'
 }
 
-show_startup_highlight_logs() {
-  local logs="$1" target_desc="$2" selected normalized_logs
-  normalized_logs="$(printf '%s\n' "$logs" | strip_ansi_codes)"
-  selected="$(printf '%s\n' "$normalized_logs" | grep -E "$STARTUP_IMPORTANT_LOG_PATTERN" | tail -n "$STARTUP_IMPORTANT_LOG_LINES" || true)"
-  if [ "$SUPPRESS_STARTUP_LOGS" = "true" ]; then
-    log "起動確認 重要ログの表示を抑制しました (--suppress-startup-logs)。"
-  else
-    diag ""
-    diag "───────────────────────────────────────────────────────────────────"
-    diag "起動確認 重要ログ (${target_desc}, 最新 ${STARTUP_IMPORTANT_LOG_LINES} 行):"
-    diag "───────────────────────────────────────────────────────────────────"
-    if [ -n "$selected" ]; then
-      printf '%s\n' "$selected" >&2
-    else
-      diag "重要ログに一致する行はありませんでした (pattern=/${STARTUP_IMPORTANT_LOG_PATTERN}/)。"
+# 端末への直接表示時だけ色を付ける。NO_COLOR を優先し、リダイレクトされたログへ
+# ANSI シーケンスを混入させない。CLICOLOR_FORCE はテストや明示的な強制表示に使える。
+startup_log_color_enabled() {
+  [ -z "${NO_COLOR+x}" ] || return 1
+  case "${CLICOLOR_FORCE:-0}" in
+    0) ;;
+    *) return 0 ;;
+  esac
+  [ -t 2 ] && [ "${TERM:-}" != "dumb" ]
+}
+
+# JBoss EAP の重要行を意味別に色分けし、その他の行はそのまま表示する。
+print_startup_logs_with_highlights() {
+  local logs="$1" line color
+  local use_color="false"
+  local error_level_pattern='[[:space:]](ERROR|FATAL)[[:space:]]'
+  local warning_level_pattern='[[:space:]]WARN(ING)?[[:space:]]'
+  local color_red=$'\033[1;31m' color_yellow=$'\033[1;33m'
+  local color_green=$'\033[1;32m' color_cyan=$'\033[1;36m' color_reset=$'\033[0m'
+
+  startup_log_color_enabled && use_color="true"
+  while IFS= read -r line || [ -n "$line" ]; do
+    color=""
+    if [ "$use_color" = "true" ]; then
+      if [[ "$line" =~ $error_level_pattern ]] || [[ "$line" =~ $STARTUP_FAILURE_LOG_PATTERN ]]; then
+        color="$color_red"
+      elif [[ "$line" =~ $warning_level_pattern ]]; then
+        color="$color_yellow"
+      elif [[ "$line" =~ $STARTUP_SUCCESS_LOG_PATTERN ]] || [[ "$line" =~ $STARTUP_LOG_PATTERN ]]; then
+        color="$color_green"
+      elif [[ "$line" =~ $STARTUP_IMPORTANT_LOG_PATTERN ]]; then
+        color="$color_cyan"
+      fi
     fi
+    if [ -n "$color" ]; then
+      printf '%s%s%s\n' "$color" "$line" "$color_reset" >&2
+    else
+      printf '%s\n' "$line" >&2
+    fi
+  done <<< "$logs"
+}
+
+show_startup_logs() {
+  local logs="$1" target_desc="$2" allow_suppression="${3:-true}"
+  local selected normalized_logs total_count shown_count display_range
+
+  if [ "$allow_suppression" = "true" ] && [ "$SUPPRESS_STARTUP_LOGS" = "true" ]; then
+    log "コンテナ起動ログの表示を抑制しました (--suppress-startup-logs)。"
+    return 0
   fi
+
+  normalized_logs="$(printf '%s\n' "$logs" | strip_ansi_codes)"
+  if [ -n "$normalized_logs" ]; then
+    total_count="$(printf '%s\n' "$normalized_logs" | awk 'END { print NR }')"
+  else
+    total_count=0
+  fi
+
+  if [ "$STARTUP_LOG_LINES" = "all" ]; then
+    selected="$normalized_logs"
+    shown_count="$total_count"
+    display_range="全 ${total_count} 行"
+  else
+    selected="$(printf '%s\n' "$normalized_logs" | tail -n "$STARTUP_LOG_LINES")"
+    if [ -n "$selected" ]; then
+      shown_count="$(printf '%s\n' "$selected" | awk 'END { print NR }')"
+    else
+      shown_count=0
+    fi
+    display_range="末尾 ${shown_count}/${total_count} 行 (指定上限: ${STARTUP_LOG_LINES})"
+  fi
+
+  diag ""
+  diag "───────────────────────────────────────────────────────────────────"
+  diag "コンテナ起動ログ (${target_desc}, ${display_range}):"
+  diag "───────────────────────────────────────────────────────────────────"
+  if [ -n "$selected" ]; then
+    if startup_log_color_enabled; then
+      printf '色分け: \033[1;32m成功\033[0m / \033[1;36m重要\033[0m / \033[1;33m警告\033[0m / \033[1;31mエラー\033[0m\n' >&2
+    fi
+    print_startup_logs_with_highlights "$selected"
+  else
+    diag "表示対象のコンテナ起動ログはありません。"
+  fi
+  diag "───────────────────────────────────────────────────────────────────"
 }
 
 # EAP 8.1 が出力する 2 種類のデータソースバインド成功メッセージから JNDI 名を
@@ -875,7 +951,7 @@ show_deploy_logs() {
 
 show_eap_diagnostics_from_logs() {
   local logs="$1" target_desc="$2"
-  show_startup_highlight_logs "$logs" "$target_desc"
+  show_startup_logs "$logs" "$target_desc"
   show_datasource_diagnostics_from_logs "$logs"
   show_deploy_logs "$logs" "$target_desc"
 }
@@ -1168,7 +1244,8 @@ show_verified_container_envs() {
 
 # 1 コンテナ内の指定ルートを report_file へ追記する。コンテナ内に追加の
 # スクリプトや tree コマンドを要求しないよう、find の NUL 区切り出力をホスト側の
-# Bash で集計する。直下のファイル数が file_limit 以下なら名前を、超える場合は
+# Bash で集計する。file_limit が none の場合はディレクトリだけを取得する。
+# それ以外は、直下のファイル数が file_limit 以下なら名前を、超える場合は
 # 最終拡張子 (例: archive.tar.gz は .gz) ごとの件数を出力する。
 append_container_directory_tree_report() {
   local cid="$1" service_name="$2" container_name="$3" report_file="$4"
@@ -1190,7 +1267,9 @@ append_container_directory_tree_report() {
     root_path="${root_path%/}"
   fi
   directory_find_args=(find "$root_path")
-  file_find_args=(find "$root_path")
+  if [ "$file_limit" != "none" ]; then
+    file_find_args=(find "$root_path")
+  fi
 
   if ! directory_list_tmp="$(mktemp 2>/dev/null)"; then
     warn "ディレクトリツリー集計用の一時ファイルを作成できませんでした (サービス: ${service_name})。"
@@ -1204,14 +1283,20 @@ append_container_directory_tree_report() {
 
   if [ "$tree_depth" != "all" ]; then
     directory_find_args+=(-maxdepth "$tree_depth")
-    file_max_depth="$((10#$tree_depth + 1))"
-    file_find_args+=(-maxdepth "$file_max_depth")
+    if [ "$file_limit" != "none" ]; then
+      file_max_depth="$((10#$tree_depth + 1))"
+      file_find_args+=(-maxdepth "$file_max_depth")
+    fi
   fi
   directory_find_args+=(-type d -print0)
-  file_find_args+=(-type f -print0)
+  if [ "$file_limit" != "none" ]; then
+    file_find_args+=(-type f -print0)
+  fi
 
   docker exec "$cid" "${directory_find_args[@]}" > "$directory_list_tmp" 2>/dev/null || directory_find_status=$?
-  docker exec "$cid" "${file_find_args[@]}" > "$file_list_tmp" 2>/dev/null || file_find_status=$?
+  if [ "$file_limit" != "none" ]; then
+    docker exec "$cid" "${file_find_args[@]}" > "$file_list_tmp" 2>/dev/null || file_find_status=$?
+  fi
 
   if [ ! -s "$directory_list_tmp" ]; then
     failure_message="${report_title}を取得できませんでした (サービス: ${service_name}, コンテナ: ${container_name}, ルート: ${root_path})。コンテナ内のパスと find コマンドを確認してください。"
@@ -1275,7 +1360,9 @@ append_container_directory_tree_report() {
     printf '%s (サービス: %s, コンテナ: %s, ルート: %s, 最大深さ: %s)\n' \
         "$report_title" "$service_name" "$container_name" "$root_path" "$tree_depth" >> "$report_file"
   fi
-  if [ "$file_limit" = "all" ]; then
+  if [ "$file_limit" = "none" ]; then
+    printf '通常ファイル: 表示しない\n' >> "$report_file"
+  elif [ "$file_limit" = "all" ]; then
     printf '通常ファイル: 件数にかかわらず全ファイル名を表示\n' >> "$report_file"
   else
     printf '通常ファイル: 直下 %s 件以下は全ファイル名、超過時は拡張子別件数\n' \
@@ -1338,7 +1425,11 @@ append_container_directory_tree_report() {
 
 show_verified_container_directory_trees() {
   [ "$DRY_RUN" = "true" ] && {
-    log "[DRY-RUN] 環境変数一覧後のコンテナ内ディレクトリツリー出力をプレビューします (最大深さ: ${DIRECTORY_TREE_DEPTH})。"
+    if [ "$DIRECTORY_FILE_LIMIT" = "none" ]; then
+      log "[DRY-RUN] 環境変数一覧後のコンテナ内ディレクトリツリー出力をプレビューします (最大深さ: ${DIRECTORY_TREE_DEPTH}, 通常ファイル: 表示しない)。"
+    else
+      log "[DRY-RUN] 環境変数一覧後のコンテナ内ディレクトリツリー出力をプレビューします (最大深さ: ${DIRECTORY_TREE_DEPTH}, ファイル表示上限: ${DIRECTORY_FILE_LIMIT})。"
+    fi
     return 0
   }
 
@@ -1450,8 +1541,13 @@ append_container_deployment_structure_report() {
   printf '\n' >> "$report_file"
   printf '===================================================================\n' >> "$report_file"
   printf 'JBoss EAP デプロイ済み Web アプリケーションのディレクトリ構造\n' >> "$report_file"
-  printf '(サービス: %s, コンテナ: %s, 最大深さ: %s, ファイル表示上限: %s)\n' \
-      "$service_name" "$container_name" "$tree_depth" "$file_limit" >> "$report_file"
+  if [ "$file_limit" = "none" ]; then
+    printf '(サービス: %s, コンテナ: %s, 最大深さ: %s, 通常ファイル: 表示しない)\n' \
+        "$service_name" "$container_name" "$tree_depth" >> "$report_file"
+  else
+    printf '(サービス: %s, コンテナ: %s, 最大深さ: %s, ファイル表示上限: %s)\n' \
+        "$service_name" "$container_name" "$tree_depth" "$file_limit" >> "$report_file"
+  fi
   printf '===================================================================\n' >> "$report_file"
   if [ "$scan_status" -ne 0 ]; then
     printf '[WARN] 読み取り不能なパスを除く、検出可能な範囲を表示します。\n' >> "$report_file"
@@ -1478,7 +1574,11 @@ append_container_deployment_structure_report() {
 
 show_verified_container_deployment_structures() {
   [ "$DRY_RUN" = "true" ] && {
-    log "[DRY-RUN] コンテナ内ツリー後の JBoss EAP デプロイ構造出力をプレビューします (最大深さ: ${DIRECTORY_TREE_DEPTH}, ファイル表示上限: ${DIRECTORY_FILE_LIMIT})。"
+    if [ "$DIRECTORY_FILE_LIMIT" = "none" ]; then
+      log "[DRY-RUN] コンテナ内ツリー後の JBoss EAP デプロイ構造出力をプレビューします (最大深さ: ${DIRECTORY_TREE_DEPTH}, 通常ファイル: 表示しない)。"
+    else
+      log "[DRY-RUN] コンテナ内ツリー後の JBoss EAP デプロイ構造出力をプレビューします (最大深さ: ${DIRECTORY_TREE_DEPTH}, ファイル表示上限: ${DIRECTORY_FILE_LIMIT})。"
+    fi
     return 0
   }
 
@@ -1645,20 +1745,16 @@ wait_for_startup() {
   done
 }
 
-# 取得済みスナップショットを使い、失敗時の全ログと EAP 診断を同じ時点の内容で表示する。
+# 取得済みスナップショットを使い、失敗時の起動ログと EAP 診断を同じ時点の内容で
+# 表示する。失敗原因を隠さないよう、--suppress-startup-logs 指定時もログを表示する。
 dump_startup_logs_from_snapshot() {
   local logs="$1" target_desc="$2"
-  diag ""
-  diag "───────────────────────────────────────────────────────────────────"
-  diag "コンテナログ (${target_desc}, 末尾 50 行):"
-  diag "───────────────────────────────────────────────────────────────────"
-  printf '%s\n' "$logs" | tail -n 50 >&2
-  diag "───────────────────────────────────────────────────────────────────"
+  show_startup_logs "$logs" "$target_desc" "false"
   show_deploy_logs "$logs" "$target_desc"
   show_datasource_diagnostics_from_logs "$logs"
 }
 
-# 失敗時にコンテナログの末尾を出力する (原因調査用)。
+# 失敗時に設定行数分のコンテナ起動ログを出力する (原因調査用)。
 # 引数でサービスを指定した場合はそのサービスのログのみ出力する。
 dump_startup_logs() {
   local logs target_desc

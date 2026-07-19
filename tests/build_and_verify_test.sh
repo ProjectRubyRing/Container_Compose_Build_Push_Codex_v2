@@ -35,6 +35,13 @@ assert_not_contains() {
   fi
 }
 
+assert_occurrences() {
+  local file="$1" expected="$2" expected_count="$3" actual_count
+  actual_count="$({ grep -Fo -- "$expected" "$file" || true; } | wc -l | tr -d '[:space:]')"
+  [ "$actual_count" = "$expected_count" ] \
+    || fail "expected '$expected' $expected_count times in $file, found $actual_count"
+}
+
 assert_matches() {
   local file="$1" pattern="$2"
   grep -Eq -- "$pattern" "$file" || fail "expected /$pattern/ in $file"
@@ -63,12 +70,14 @@ success_output="$TEST_TMP/success.out"
 export FAKE_COMPOSE_LOG_FILE="$TEST_DIR/fixtures/jboss-eap-8.1-success.log"
 if ! (
   cd "$REPO_ROOT"
-  bash ./build_and_verify.sh \
+  unset NO_COLOR
+  CLICOLOR_FORCE=1 bash ./build_and_verify.sh \
     --verify-startup \
     --compose-service app \
     --startup-service app \
     --env-list-limit 1 \
     --directory-tree-depth 2 \
+    --directory-file-limit 10 \
     --deployment-dir-env APP_CONFIG_DIR \
     --report-dir "$TEST_TMP/reports" \
     --suppress-removed-logs
@@ -81,16 +90,21 @@ assert_contains "$success_output" "BuildKit のビルドログ表示形式: plai
 assert_contains "$success_output" "[fake-build] BUILDKIT_PROGRESS=plain"
 assert_contains "$success_output" "ビルド結果: image=j1/base.local, id=sha256:test-image"
 assert_contains "$success_output" "jbosseap サーバーの起動完了を確認しました: サービス 'app'"
+assert_contains "$success_output" "コンテナ起動ログ (対象サービス: app, 全 15 行):"
+assert_contains "$success_output" "APP000001: Orders application initialized"
+assert_contains "$success_output" $'\033[1;36mapp-1  | 09:17:43,001 INFO'
+assert_contains "$success_output" $'\033[1;32mapp-1  | 09:17:47,305 INFO'
 assert_contains "$success_output" "java:jboss/datasources/Orders#Primary"
 assert_contains "$success_output" "java:app/jdbc/ReportingDS"
 assert_contains "$success_output" "デプロイ済みアプリケーション:"
 assert_contains "$success_output" "orders.war"
 assert_contains "$success_output" "登録済み Web コンテキスト:"
 assert_contains "$success_output" "/orders"
-assert_not_contains "$success_output" "java:/JmsXA"
-assert_not_contains "$success_output" "old.war"
-assert_not_contains "$success_output" "/opt/eap/standalone/data/content/ab/cd/content"
+assert_occurrences "$success_output" "java:/JmsXA" 1
+assert_occurrences "$success_output" "old.war" 2
+assert_occurrences "$success_output" "/opt/eap/standalone/data/content/ab/cd/content" 1
 assert_contains "$success_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: 2)"
+assert_contains "$success_output" "通常ファイル: 直下 10 件以下は全ファイル名、超過時は拡張子別件数"
 assert_contains "$success_output" "  app/"
 assert_contains "$success_output" "    [ファイル] application.jar"
 assert_contains "$success_output" "    [ファイル] archive.tar.gz"
@@ -117,6 +131,7 @@ assert_before "$success_output" "コンテナ内ディレクトリツリー (サ
 assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ app'
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type d -print0"
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -type f -print0"
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 3 -type f -print0"
 
 report_files=("$TEST_TMP/reports"/build_and_verify_*.txt)
 [ ${#report_files[@]} -eq 1 ] && [ -f "${report_files[0]}" ] \
@@ -137,6 +152,29 @@ assert_contains "$full_report" "deep.json"
 assert_contains "$full_report" "Order01.class"
 assert_contains "$full_report" "Order11.class"
 
+startup_log_limit_output="$TEST_TMP/startup-log-limit.out"
+: > "$FAKE_DOCKER_CALLS"
+if ! (
+  cd "$REPO_ROOT"
+  CLICOLOR_FORCE=0 bash ./build_and_verify.sh \
+    --verify-startup \
+    --compose-service app \
+    --startup-service app \
+    --startup-log-lines 2 \
+    --env-list-limit 1 \
+    --suppress-removed-logs
+) >"$startup_log_limit_output" 2>&1; then
+  cat "$startup_log_limit_output" >&2
+  fail "startup log line limit scenario returned a non-zero status"
+fi
+
+assert_contains "$startup_log_limit_output" "コンテナ起動ログ (対象サービス: app, 末尾 2/15 行 (指定上限: 2)):"
+assert_contains "$startup_log_limit_output" "WFLYSRV0010"
+assert_contains "$startup_log_limit_output" "WFLYSRV0025"
+assert_not_contains "$startup_log_limit_output" "WFLYSRV0049"
+assert_not_contains "$startup_log_limit_output" "APP000001"
+assert_not_contains "$startup_log_limit_output" $'\033['
+
 tree_depth_output="$TEST_TMP/tree-depth.out"
 : > "$FAKE_DOCKER_CALLS"
 if ! (
@@ -154,14 +192,23 @@ if ! (
 fi
 
 assert_contains "$tree_depth_output" "コンテナ内ディレクトリツリー (サービス: app, コンテナ: test-app-1, 最大深さ: 1)"
+assert_contains "$tree_depth_output" "通常ファイル: 表示しない"
 assert_contains "$tree_depth_output" "  app/"
-assert_contains "$tree_depth_output" "    [ファイル] application.jar"
-assert_contains "$tree_depth_output" "    [ファイル] archive.tar.gz"
 assert_contains "$tree_depth_output" "  empty/"
 assert_not_contains "$tree_depth_output" "    config/"
-assert_not_contains "$tree_depth_output" "application.yaml"
+assert_not_contains "$tree_depth_output" "[ファイル]"
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 1 -type d -print0"
-assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app find / -maxdepth 2 -type f -print0"
+assert_not_contains "$FAKE_DOCKER_CALLS" "-type f -print0"
+
+invalid_startup_log_lines_output="$TEST_TMP/startup-log-lines-invalid.out"
+if (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh --dry-run --startup-log-lines 0
+) >"$invalid_startup_log_lines_output" 2>&1; then
+  cat "$invalid_startup_log_lines_output" >&2
+  fail "invalid startup log line limit unexpectedly returned zero"
+fi
+assert_contains "$invalid_startup_log_lines_output" "--startup-log-lines には 1 以上の整数を指定してください: 0"
 
 invalid_tree_depth_output="$TEST_TMP/tree-depth-invalid.out"
 if (
@@ -218,7 +265,8 @@ failure_output="$TEST_TMP/failure.out"
 export FAKE_COMPOSE_LOG_FILE="$TEST_DIR/fixtures/jboss-eap-8.1-failure.log"
 if (
   cd "$REPO_ROOT"
-  bash ./build_and_verify.sh \
+  unset NO_COLOR
+  CLICOLOR_FORCE=1 bash ./build_and_verify.sh \
     --verify-startup \
     --compose-service app \
     --startup-service app \
@@ -231,6 +279,8 @@ if (
 fi
 
 assert_contains "$failure_output" "JBoss EAP 8.1 が正常起動しませんでした"
+assert_contains "$failure_output" "コンテナ起動ログ (対象サービス: app, 全 5 行):"
+assert_contains "$failure_output" $'\033[1;31mapp-1  | 09:18:00,100 ERROR'
 assert_contains "$failure_output" "WFLYSRV0026"
 assert_contains "$failure_output" "[デプロイエラー関連]"
 assert_contains "$failure_output" "WFLYSRV0021"
@@ -523,4 +573,4 @@ assert_contains "$FAKE_DOCKER_CALLS" "network prune --force"
 assert_contains "$FAKE_DOCKER_CALLS" "system prune --all --volumes --force"
 assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
 
-printf 'PASS: build_and_verify.sh EAP 8.1 log, interaction, deployment tree, full report, and Docker cleanup scenarios\n'
+printf 'PASS: build_and_verify.sh EAP 8.1 startup log display/color, interaction, deployment tree, full report, and Docker cleanup scenarios\n'
