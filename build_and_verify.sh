@@ -156,10 +156,14 @@ DIRECTORY_TREE_PRUNE_PATHS=(
   /afs
   /aws
   /etc
+  /local/aws-cli
   /opt/jboss-eap/.galleon
+  /opt/jboss-eap/modules/system/layers/base
   /proc
+  /share
   /sys
   /usr/lib
+  /usr/lib64
 )
 
 # ---- 全量ビルドレポート出力 --------------------------------------------------
