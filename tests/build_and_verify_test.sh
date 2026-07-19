@@ -434,7 +434,7 @@ if (
   cat "$invalid_keep_mode_output" >&2
   fail "invalid keep-container mode unexpectedly returned zero"
 fi
-assert_contains "$invalid_keep_mode_output" "--keep-container-mode には bash または http を指定してください: invalid"
+assert_contains "$invalid_keep_mode_output" "--keep-container-mode には bash、http または logs を指定してください: invalid"
 
 invalid_http_port_output="$TEST_TMP/keep-mode-http-invalid-port.out"
 if (
@@ -468,6 +468,163 @@ assert_contains "$bash_mode_output" "検証対象コンテナの bash へ接続�
 assert_contains "$bash_mode_output" "bash セッションを終了しました。コンテナは起動状態を維持します"
 assert_contains "$bash_mode_output" "コンテナを残します (--keep-container)"
 assert_contains "$FAKE_DOCKER_CALLS" "exec -it cid-app /bin/bash"
+assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+logs_mode_output="$TEST_TMP/keep-mode-logs.out"
+: > "$FAKE_DOCKER_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="app db"
+if ! printf 'invalid\n3\n2\ninvalid\n1\n\n0\n1\n2\n0\n0\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app,db \
+    --startup-service app \
+    --keep-container-mode logs \
+    --suppress-startup-logs \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$logs_mode_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES
+  cat "$logs_mode_output" >&2
+  fail "Compose service action keep-container mode returned a non-zero status"
+fi
+unset FAKE_COMPOSE_PS_SERVICES
+
+assert_occurrences "$logs_mode_output" "操作する起動中の Compose サービスを選択してください:" 3
+assert_occurrences "$logs_mode_output" "  1) app" 3
+assert_occurrences "$logs_mode_output" "  2) db" 3
+assert_occurrences "$logs_mode_output" "0 から 2 の番号を入力してください。" 3
+assert_occurrences "$logs_mode_output" "Compose サービス 'db' で実行する操作を選択してください:" 3
+assert_occurrences "$logs_mode_output" "Compose サービス 'app' で実行する操作を選択してください:" 2
+assert_occurrences "$logs_mode_output" "  1) ログを表示" 5
+assert_occurrences "$logs_mode_output" "  2) bash へ接続 (cd・任意コマンドを実行可能)" 5
+assert_occurrences "$logs_mode_output" "Compose サービスログ (サービス:" 1
+assert_contains "$logs_mode_output" "Compose サービスログ (サービス: db, 末尾 50/52 行 (指定上限: 50)):"
+assert_contains "$logs_mode_output" "DB003: companion service log"
+assert_contains "$logs_mode_output" "DB052: companion service log"
+assert_not_contains "$logs_mode_output" "DB001: companion service log"
+assert_not_contains "$logs_mode_output" "DB002: companion service log"
+assert_contains "$logs_mode_output" "Compose サービスの bash へ接続します (service=app, container=test-app-1)。"
+assert_contains "$logs_mode_output" "この bash セッション内では cd によるディレクトリ移動と任意のコマンド実行が可能です。"
+assert_contains "$logs_mode_output" "bash セッションを終了しました。サービス操作の選択へ戻ります。"
+assert_before "$logs_mode_output" "Compose サービスログ (サービス: db" "Compose サービスの bash へ接続します (service=app"
+assert_contains "$logs_mode_output" "Compose サービス 'db' の操作を終了し、サービス選択へ戻ります。"
+assert_contains "$logs_mode_output" "Compose サービス 'app' の操作を終了し、サービス選択へ戻ります。"
+assert_contains "$logs_mode_output" "Compose サービスの対話操作を終了しました。"
+assert_contains "$logs_mode_output" "コンテナを残します (--keep-container)"
+assert_occurrences "$FAKE_DOCKER_CALLS" "compose -f compose.yml ps --services" 3
+assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ db'
+assert_contains "$FAKE_DOCKER_CALLS" "exec -it cid-app /bin/bash"
+assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+cwagent_helper_output="$TEST_TMP/keep-mode-cwagent-helper.out"
+: > "$FAKE_DOCKER_CALLS"
+: > "$FAKE_CURL_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="app cwagent cloudwatch-logs-mock"
+export FAKE_CLOUDWATCH_JOURNAL_FILE="$TEST_DIR/fixtures/cloudwatch-wiremock-requests.json"
+if ! printf '2\n3\n\n0\n0\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app,cwagent,cloudwatch-logs-mock \
+    --startup-service app \
+    --keep-container-mode logs \
+    --suppress-startup-logs \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$cwagent_helper_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES FAKE_CLOUDWATCH_JOURNAL_FILE
+  cat "$cwagent_helper_output" >&2
+  fail "cwagent CloudWatch Logs helper returned a non-zero status"
+fi
+unset FAKE_COMPOSE_PS_SERVICES FAKE_CLOUDWATCH_JOURNAL_FILE
+
+assert_contains "$cwagent_helper_output" "3) CloudWatch Logs 偽装送達を確認 (ロググループ / ストリーム / イベント)"
+assert_contains "$cwagent_helper_output" "CloudWatch Agent → CloudWatch Logs 偽装サービスの送達を確認します。"
+assert_contains "$cwagent_helper_output" "WireMock API 受信総数: CreateLogGroup=2, CreateLogStream=2, PutLogEvents=3"
+assert_contains "$cwagent_helper_output" "[OK] /mnt/logs/app-front*.log"
+assert_contains "$cwagent_helper_output" "log group : /local/myapp/efs/app-front"
+assert_contains "$cwagent_helper_output" "log stream: front-local"
+assert_contains "$cwagent_helper_output" "[OK] /mnt/logs/app-back*.log"
+assert_contains "$cwagent_helper_output" "request completed token=[REDACTED]"
+assert_contains "$cwagent_helper_output" "database call completed"
+assert_not_contains "$cwagent_helper_output" "dummy-secret"
+assert_not_contains "$cwagent_helper_output" "AWS4-HMAC-SHA256"
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-cwagent cat /etc/cwagentconfig/cwagent-config.json"
+assert_contains "$FAKE_DOCKER_CALLS" "port cid-cloudwatch-logs-mock 8080/tcp"
+assert_contains "$FAKE_CURL_CALLS" "http://127.0.0.1:18480/__admin/requests?limit=100"
+assert_contains "$FAKE_CURL_CALLS" "Logs_20140328.PutLogEvents"
+assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+otel_helper_output="$TEST_TMP/keep-mode-otel-helper.out"
+: > "$FAKE_DOCKER_CALLS"
+: > "$FAKE_CURL_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="app adot-collector jaeger"
+export FAKE_JAEGER_SERVICES_FILE="$TEST_DIR/fixtures/jaeger-services.json"
+export FAKE_JAEGER_TRACES_FILE="$TEST_DIR/fixtures/jaeger-traces.json"
+if ! printf '2\n3\ninvalid\n1\n\n0\n0\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app,adot-collector,jaeger \
+    --startup-service app \
+    --keep-container-mode logs \
+    --suppress-startup-logs \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$otel_helper_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES FAKE_JAEGER_SERVICES_FILE FAKE_JAEGER_TRACES_FILE
+  cat "$otel_helper_output" >&2
+  fail "OTel Jaeger trace helper returned a non-zero status"
+fi
+unset FAKE_COMPOSE_PS_SERVICES FAKE_JAEGER_SERVICES_FILE FAKE_JAEGER_TRACES_FILE
+
+assert_contains "$otel_helper_output" "3) X-Ray 偽装 Jaeger のトレースを確認 (サービス / トレース / スパン)"
+assert_contains "$otel_helper_output" "OTel Collector ヘルスチェック: OK (service=adot-collector)"
+assert_contains "$otel_helper_output" "TracesExporter resource spans: 2, spans: 4"
+assert_contains "$otel_helper_output" "OTel Collector → X-Ray 偽装 Jaeger のトレース送達を確認します。"
+assert_contains "$otel_helper_output" "実 AWS X-Ray への送信確認ではありません。"
+assert_contains "$otel_helper_output" "0 から 2 の番号を入力してください。"
+assert_contains "$otel_helper_output" "検索サービス: myapp-front"
+assert_contains "$otel_helper_output" "取得トレース: 1 件"
+assert_contains "$otel_helper_output" "traceID=66a00000000000001234567890abcdef"
+assert_contains "$otel_helper_output" "services=myapp-back, myapp-front"
+assert_contains "$otel_helper_output" "[myapp-front] GET /orders"
+assert_contains "$otel_helper_output" "[myapp-back] SELECT orders"
+assert_contains "$otel_helper_output" "db.system=mysql"
+assert_contains "$otel_helper_output" "http.request.header.authorization=[REDACTED]"
+assert_contains "$otel_helper_output" "SELECT * FROM orders WHERE token=[REDACTED]"
+assert_not_contains "$otel_helper_output" "dummy-secret"
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-adot-collector /healthcheck"
+assert_contains "$FAKE_DOCKER_CALLS" "port cid-jaeger 16686/tcp"
+assert_contains "$FAKE_CURL_CALLS" "http://127.0.0.1:16686/api/services"
+assert_contains "$FAKE_CURL_CALLS" "--data-urlencode service=myapp-front"
+assert_contains "$FAKE_CURL_CALLS" "http://127.0.0.1:16686/api/traces"
+assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+otel_no_traces_output="$TEST_TMP/keep-mode-otel-no-traces.out"
+: > "$FAKE_DOCKER_CALLS"
+: > "$FAKE_CURL_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="app adot-collector jaeger"
+export FAKE_JAEGER_SERVICES_BODY='{"data":[]}'
+if ! printf '2\n3\n\n0\n0\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app,adot-collector,jaeger \
+    --startup-service app \
+    --keep-container-mode logs \
+    --suppress-startup-logs \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$otel_no_traces_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES FAKE_JAEGER_SERVICES_BODY
+  cat "$otel_no_traces_output" >&2
+  fail "empty Jaeger service scenario returned a non-zero status"
+fi
+unset FAKE_COMPOSE_PS_SERVICES FAKE_JAEGER_SERVICES_BODY
+assert_contains "$otel_no_traces_output" "Jaeger にトレースサービスが登録されていません。"
+assert_contains "$otel_no_traces_output" "サービス操作の選択へ戻ります"
 assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
 
 http_get_output="$TEST_TMP/keep-mode-http-get.out"

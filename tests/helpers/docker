@@ -54,6 +54,11 @@ if [ "${1:-}" = "compose" ]; then
       elif [ "$last_arg" = "cache" ]; then
         printf 'cache-1  | CACHE001: cache ready\n'
         printf 'cache-1  | CACHE002: accepting connections\n'
+      elif [ "$last_arg" = "cwagent" ]; then
+        printf 'cwagent  | I! CloudWatch agent started\n'
+        printf 'cwagent  | I! Log collection configured\n'
+      elif [ "$last_arg" = "adot-collector" ] || [ "$last_arg" = "otel" ]; then
+        printf 'adot-collector  | TracesExporter resource spans: 2, spans: 4\n'
       else
         cat "$FAKE_COMPOSE_LOG_FILE"
       fi
@@ -64,7 +69,13 @@ if [ "${1:-}" = "compose" ]; then
           printf '%s\n' "$fake_service"
         done
       else
-        printf 'cid-app\n'
+        case "${!#}" in
+          cwagent) printf 'cid-cwagent\n' ;;
+          cloudwatch-logs-mock) printf 'cid-cloudwatch-logs-mock\n' ;;
+          adot-collector|otel) printf 'cid-adot-collector\n' ;;
+          jaeger) printf 'cid-jaeger\n' ;;
+          *) printf 'cid-app\n' ;;
+        esac
       fi
       ;;
     down)
@@ -89,6 +100,16 @@ fi
 
 if [ "${1:-}" = "port" ] && [ "${2:-}" = "cid-app" ] && [ "${3:-}" = "8080/tcp" ]; then
   printf '0.0.0.0:18080\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "port" ] && [ "${2:-}" = "cid-cloudwatch-logs-mock" ] && [ "${3:-}" = "8080/tcp" ]; then
+  printf '0.0.0.0:18480\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "port" ] && [ "${2:-}" = "cid-jaeger" ] && [ "${3:-}" = "16686/tcp" ]; then
+  printf '0.0.0.0:16686\n'
   exit 0
 fi
 
@@ -215,7 +236,13 @@ if [ "${1:-}" = "inspect" ]; then
       printf 'app\n'
       ;;
     *"{{.Name}}"*)
-      printf '/test-app-1\n'
+      case "$*" in
+        *"cid-cwagent"*) printf '/cwagent\n' ;;
+        *"cid-cloudwatch-logs-mock"*) printf '/cloudwatch-logs-mock\n' ;;
+        *"cid-adot-collector"*) printf '/adot-collector\n' ;;
+        *"cid-jaeger"*) printf '/jaeger\n' ;;
+        *) printf '/test-app-1\n' ;;
+      esac
       ;;
     *".NetworkSettings.Networks"*)
       printf '172.20.0.2\n'
@@ -230,6 +257,38 @@ if [ "${1:-}" = "inspect" ]; then
       fail "$@"
       ;;
   esac
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ] && [ "${2:-}" = "cid-cwagent" ] \
+    && [ "${3:-}" = "cat" ] && [ "${4:-}" = "/etc/cwagentconfig/cwagent-config.json" ]; then
+  cat <<'JSON'
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/mnt/logs/app-front*.log",
+            "log_group_name": "/local/myapp/efs/app-front",
+            "log_stream_name": "front-local"
+          },
+          {
+            "file_path": "/mnt/logs/app-back*.log",
+            "log_group_name": "/local/myapp/efs/app-back",
+            "log_stream_name": "back-local"
+          }
+        ]
+      }
+    }
+  }
+}
+JSON
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ] && [ "${2:-}" = "cid-adot-collector" ] \
+    && [ "${3:-}" = "/healthcheck" ]; then
   exit 0
 fi
 

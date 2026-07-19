@@ -24,7 +24,9 @@
 #   (6) 全量レポート        : ビルド結果と全量の環境変数・ツリー・デプロイ構造を
 #                          日時付きテキストファイルへ保存する。
 #   (7) --keep-container-mode: 起動確認後もコンテナを残し、検証対象へ直接
-#                          bash 接続するか、対話式の HTTP リクエストを実行する。
+#                          bash 接続するか、対話式の HTTP リクエスト、または
+#                          起動中 Compose サービスのログ閲覧・bash 接続、および
+#                          cwagent / OTel のローカル送達診断を実行する。
 #
 # --verify-startup / --verify-url いずれも指定しなければ、純粋にビルドのみを
 # 行って終了する (従来の build_and_push.sh --build-only 相当)。
@@ -96,7 +98,7 @@ STARTUP_FAILURE_LOG_PATTERN='WFLYSRV0026:|WFLYSRV0056:'
 STARTUP_TIMEOUT="120"             # 起動完了を待つ最大秒数
 STARTUP_INTERVAL="3"              # 起動確認ポーリング間隔 (秒)
 KEEP_CONTAINER="false"            # true: 確認後もコンテナを停止・削除せずに残す
-KEEP_CONTAINER_MODE=""            # bash/http: 確認後に実行する対話操作 (指定時はコンテナを残す)
+KEEP_CONTAINER_MODE=""            # bash/http/logs: 確認後に実行する対話操作 (指定時はコンテナを残す)
 SUPPRESS_REMOVED_LOGS="false"     # true: compose down の Removed ログ等を抑制する
 SUPPRESS_STARTUP_LOGS="false"     # true: 起動確認対象と同時起動サービスのログ表示を抑制する
 STARTUP_LOG_LINES="50"            # all: 全行表示 / 数値: 末尾からの最大表示行数
@@ -132,6 +134,14 @@ HTTP_REQUEST_METHOD=""
 HTTP_REQUEST_PATH=""
 HTTP_REQUEST_BODY=""
 HTTP_REQUEST_CONTENT_TYPE=""
+OBSERVABILITY_HTTP_HOST=""
+OBSERVABILITY_HTTP_PORT=""
+OBSERVABILITY_HTTP_BASE_URL=""
+OBSERVABILITY_CONTAINER_NAME=""
+OBSERVABILITY_PYTHON=""
+OBSERVABILITY_WIREMOCK_REQUEST_LIMIT="100"
+OBSERVABILITY_EVENT_DISPLAY_LIMIT="20"
+OBSERVABILITY_TRACE_LIMIT="5"
 
 # BuildKit の tty 表示はログ保存時に途中経過が上書きされるため、未指定時は
 # plain を使用して各ビルドステップの出力を確実に残す。利用者が環境変数を
@@ -295,8 +305,8 @@ JBoss マスターパスワード (BuildKit シークレット):
   --startup-interval SEC   起動確認のポーリング間隔・秒 (既定: 3)
   --startup-log-lines N|all
                            起動確認対象と、同時に起動した他 Compose サービスの
-                           ログ画面表示行数。N は各サービスの末尾 N 行、all は
-                           全行を表示する (既定: 50)
+                           ログ、および logs モードで選択したサービスの画面表示行数。
+                           N は各サービスの末尾 N 行、all は全行を表示する (既定: 50)
   --suppress-startup-logs  起動確認対象と同時起動サービスのログ表示を抑制する
                            (起動判定は継続)
   --keep-container         確認後もコンテナを停止・削除せずに残す (調査用)
@@ -307,7 +317,15 @@ JBoss マスターパスワード (BuildKit シークレット):
                            MODE:
                              bash  docker exec で /bin/bash へ直接接続する
                              http  JBoss EAP へ対話式の HTTP リクエストを送る
-                           対象が複数ある場合は番号選択ダイアログを表示する。
+                              logs  起動中 Compose サービスを番号で選択後、
+                                    ログ表示または対話式 bash 接続を繰り返す。
+                                    cwagent / cloudwatch-logs-mock では CloudWatch
+                                    Logs 偽装送達、otel / adot-collector / jaeger
+                                    では X-Ray 偽装トレースも確認できる
+                                    (bash 接続先には /bin/bash が必要)
+                           bash/http で対象が複数ある場合と、logs のサービス選択では
+                           番号選択ダイアログを表示する。
+                           送達診断の JSON 整形には curl と Python 3 が必要。
   --jboss-context-root ROOT
                            http モードで使う JBoss EAP のコンテキストルート。
                            未指定時は WFLYUT0021 ログから検出し、複数なら選択する。
@@ -455,12 +473,12 @@ fi
 
 case "$KEEP_CONTAINER_MODE" in
   "") ;;
-  bash|http)
+  bash|http|logs)
     KEEP_CONTAINER="true"
     VERIFY_STARTUP="true"
     ;;
   *)
-    err "--keep-container-mode には bash または http を指定してください: ${KEEP_CONTAINER_MODE}"
+    err "--keep-container-mode には bash、http または logs を指定してください: ${KEEP_CONTAINER_MODE}"
     exit 2
     ;;
 esac
@@ -564,6 +582,7 @@ fi
 
 # ---- 依存コマンド確認 -------------------------------------------------------
 # ビルドには docker が必須。URL 応答確認または対話式 HTTP 通信では curl も必須。
+# logs モードの可観測性ヘルパーは、選択時に curl と Python 3 を確認する。
 # パラメータストアからパスワードを取得する場合は aws も必須。
 REQUIRED_CMDS=(docker)
 if [ -n "$VERIFY_URL" ] || [ "$KEEP_CONTAINER_MODE" = "http" ]; then
@@ -828,6 +847,7 @@ print_startup_logs_with_highlights() {
 
 show_startup_logs() {
   local logs="$1" target_desc="$2" allow_suppression="${3:-true}"
+  local log_title="${4:-コンテナ起動ログ}"
   local selected normalized_logs total_count shown_count display_range
 
   if [ "$allow_suppression" = "true" ] && [ "$SUPPRESS_STARTUP_LOGS" = "true" ]; then
@@ -858,7 +878,7 @@ show_startup_logs() {
 
   diag ""
   diag "───────────────────────────────────────────────────────────────────"
-  diag "コンテナ起動ログ (${target_desc}, ${display_range}):"
+  diag "${log_title} (${target_desc}, ${display_range}):"
   diag "───────────────────────────────────────────────────────────────────"
   if [ -n "$selected" ]; then
     if startup_log_color_enabled; then
@@ -2325,6 +2345,908 @@ run_interactive_http_request() {
   return 0
 }
 
+# 選択された Compose サービスについて、今回の compose up 以降のログを
+# --startup-log-lines の表示件数で出力する。明示的な対話操作なので、
+# --suppress-startup-logs が指定されていてもここでは抑制しない。
+show_interactive_compose_service_logs() {
+  local service_name="$1" logs
+
+  if ! logs="$(compose_logs "$service_name")"; then
+    err "Compose サービス '${service_name}' のログを取得できませんでした。"
+    [ -n "$logs" ] && printf '%s\n' "$logs" >&2
+    return 1
+  fi
+  show_startup_logs "$logs" "サービス: ${service_name}" "false" "Compose サービスログ"
+}
+
+# 選択された Compose サービスの実行中コンテナへ対話式 bash で接続する。
+# 同じシェルセッションが続くため、cd で移動しながら任意のコマンドを実行できる。
+run_interactive_compose_bash() {
+  local service_name="$1" container_id container_name
+  local -a container_ids=()
+
+  mapfile -t container_ids < <(compose_container_ids "$service_name")
+  if [ ${#container_ids[@]} -eq 0 ]; then
+    err "Compose サービス '${service_name}' の実行中コンテナが見つかりません。"
+    return 1
+  fi
+  container_id="${container_ids[0]}"
+  container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$container_id" 2>/dev/null || printf '%s' "$container_id")")"
+  if [ ${#container_ids[@]} -gt 1 ]; then
+    warn "Compose サービス '${service_name}' は複数コンテナで実行中のため、先頭のコンテナを使用します: ${container_name}"
+  fi
+
+  diag ""
+  diag "Compose サービスの bash へ接続します (service=${service_name}, container=${container_name})。"
+  diag "この bash セッション内では cd によるディレクトリ移動と任意のコマンド実行が可能です。"
+  diag "bash を終了するとサービス操作の選択へ戻ります。コンテナは起動状態を維持します。"
+  if ! docker exec -it "$container_id" /bin/bash; then
+    err "Compose サービス '${service_name}' の /bin/bash へ接続できませんでした: ${container_name}"
+    return 1
+  fi
+  log "コンテナの bash セッションを終了しました。サービス操作の選択へ戻ります。"
+}
+
+# 可観測性ヘルパーの JSON は認証ヘッダー等を含み得るため、生データを表示せず
+# Python 3 で必要な項目だけを抽出する。logs モード全体の必須依存にはせず、
+# 専用ヘルパーが選択された時点で利用可否を確認する。
+resolve_observability_python() {
+  local candidate
+
+  [ -n "$OBSERVABILITY_PYTHON" ] && return 0
+  for candidate in python3 python /usr/libexec/platform-python; do
+    if command -v "$candidate" >/dev/null 2>&1 \
+        && "$candidate" -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 else 1)' \
+          >/dev/null 2>&1; then
+      OBSERVABILITY_PYTHON="$candidate"
+      return 0
+    fi
+  done
+  err "可観測性ヘルパーの JSON 解析に必要な Python 3 が見つかりません。"
+  err "python3、python (Python 3)、または /usr/libexec/platform-python を利用可能にしてください。"
+  return 1
+}
+
+require_observability_tools() {
+  if ! command -v curl >/dev/null 2>&1; then
+    err "可観測性ヘルパーの HTTP 確認に必要な curl が見つかりません。"
+    return 1
+  fi
+  resolve_observability_python
+}
+
+# Compose サービスのコンテナ側 HTTP ポートをホストから到達できる URL へ解決する。
+# 公開ポートを優先し、未公開の場合はコンテナ IP を使用する。
+resolve_compose_service_http_endpoint() {
+  local service_name="$1" container_port="$2"
+  local container_id container_name mapping="" mapped_host="" mapped_port=""
+  local container_ip="" host_for_url=""
+  local -a container_ids=()
+
+  OBSERVABILITY_HTTP_HOST=""
+  OBSERVABILITY_HTTP_PORT=""
+  OBSERVABILITY_HTTP_BASE_URL=""
+  OBSERVABILITY_CONTAINER_NAME=""
+
+  mapfile -t container_ids < <(compose_container_ids "$service_name")
+  if [ ${#container_ids[@]} -eq 0 ]; then
+    err "Compose サービス '${service_name}' の実行中コンテナが見つかりません。"
+    return 1
+  fi
+  container_id="${container_ids[0]}"
+  container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$container_id" 2>/dev/null || printf '%s' "$container_id")")"
+  if [ ${#container_ids[@]} -gt 1 ]; then
+    warn "Compose サービス '${service_name}' は複数コンテナで実行中のため、先頭のコンテナを使用します: ${container_name}"
+  fi
+
+  mapping="$(docker port "$container_id" "${container_port}/tcp" 2>/dev/null | sed -n '1p' || true)"
+  if [ -n "$mapping" ]; then
+    mapped_port="${mapping##*:}"
+    mapped_host="${mapping%:*}"
+    mapped_host="${mapped_host#[}"
+    mapped_host="${mapped_host%]}"
+    case "$mapped_host" in
+      ""|0.0.0.0|::) mapped_host="127.0.0.1" ;;
+    esac
+    if printf '%s' "$mapped_port" | grep -qE '^[0-9]+$'; then
+      OBSERVABILITY_HTTP_HOST="$mapped_host"
+      OBSERVABILITY_HTTP_PORT="$mapped_port"
+    fi
+  fi
+
+  if [ -z "$OBSERVABILITY_HTTP_HOST" ]; then
+    container_ip="$(
+      docker inspect -f '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' \
+        "$container_id" 2>/dev/null | sed -n '/./{p;q;}' || true
+    )"
+    if [ -z "$container_ip" ]; then
+      err "Compose サービス '${service_name}' の公開ポートまたはコンテナ IP を解決できませんでした。"
+      return 1
+    fi
+    OBSERVABILITY_HTTP_HOST="$container_ip"
+    OBSERVABILITY_HTTP_PORT="$container_port"
+    warn "サービス '${service_name}' のポート ${container_port}/tcp は未公開のため、コンテナ IP (${container_ip}) へ接続します。"
+  fi
+
+  host_for_url="$OBSERVABILITY_HTTP_HOST"
+  case "$host_for_url" in
+    *:*) host_for_url="[${host_for_url}]" ;;
+  esac
+  OBSERVABILITY_HTTP_BASE_URL="http://${host_for_url}:${OBSERVABILITY_HTTP_PORT}"
+  OBSERVABILITY_CONTAINER_NAME="$container_name"
+  log "Compose サービスの確認 URL を解決しました: ${service_name} -> ${OBSERVABILITY_HTTP_BASE_URL}"
+}
+
+observability_http_get() {
+  curl -sS --noproxy '*' --max-time "$URL_TIMEOUT" "$1"
+}
+
+observability_http_post_json() {
+  local url="$1"
+  curl -sS --noproxy '*' --max-time "$URL_TIMEOUT" \
+    --request POST --header "Content-Type: application/json" \
+    --data-binary @- "$url"
+}
+
+wiremock_request_count() {
+  local base_url="$1" target="$2" payload response
+
+  payload="$(printf '{"method":"POST","url":"/","headers":{"X-Amz-Target":{"equalTo":"%s"}}}' "$target")"
+  if ! response="$(printf '%s' "$payload" | observability_http_post_json "${base_url}/__admin/requests/count")"; then
+    return 1
+  fi
+  printf '%s' "$response" | "$OBSERVABILITY_PYTHON" -c \
+    'import json,sys; value=json.load(sys.stdin).get("count"); print(value if isinstance(value, int) else "?")'
+}
+
+# fd 3: cwagent 設定、fd 4: WireMock request journal。
+# Authorization 等のヘッダーは読み捨て、設定済み送信先と PutLogEvents 本文だけを表示する。
+render_cloudwatch_delivery_report() {
+  local config_json="$1" journal_json="$2"
+  local create_group_count="$3" create_stream_count="$4" put_count="$5"
+
+  "$OBSERVABILITY_PYTHON" - "$create_group_count" "$create_stream_count" "$put_count" \
+      "$OBSERVABILITY_EVENT_DISPLAY_LIMIT" "$OBSERVABILITY_WIREMOCK_REQUEST_LIMIT" \
+      3< <(printf '%s' "$config_json") 4< <(printf '%s' "$journal_json") <<'PY'
+import base64
+import datetime
+import json
+import os
+import re
+import sys
+
+
+def load_json_fd(fd, label):
+    try:
+        with os.fdopen(fd, encoding="utf-8") as stream:
+            return json.load(stream)
+    except Exception as exc:
+        print(f"[ERROR] {label} の JSON を解析できません: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def header_value(request, name):
+    headers = request.get("headers") or {}
+    value = headers.get(name)
+    if value is None:
+        for key, candidate in headers.items():
+            if str(key).lower() == name.lower():
+                value = candidate
+                break
+    if isinstance(value, list):
+        return str(value[0]) if value else ""
+    if isinstance(value, dict):
+        values = value.get("values")
+        if isinstance(values, list):
+            return str(values[0]) if values else ""
+        return str(value.get("value") or "")
+    return str(value or "")
+
+
+def request_body(request):
+    body = request.get("body")
+    if isinstance(body, dict):
+        return body
+    if isinstance(body, str) and body:
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError:
+            return {}
+    encoded = request.get("bodyAsBase64")
+    if encoded:
+        try:
+            return json.loads(base64.b64decode(encoded).decode("utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def clean_text(value, limit=500):
+    text = str(value if value is not None else "")
+    text = text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    text = re.sub(
+        r"(?i)\b(password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)"
+        r"(\s*[:=]\s*)([^\s,;]+)",
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        text,
+    )
+    return text if len(text) <= limit else text[:limit] + "...(省略)"
+
+
+def event_time(value):
+    try:
+        stamp = float(value) / 1000.0
+        return datetime.datetime.fromtimestamp(
+            stamp, datetime.timezone.utc
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except Exception:
+        return clean_text(value)
+
+
+config = load_json_fd(3, "cwagent 設定")
+journal = load_json_fd(4, "WireMock request journal")
+create_group_count, create_stream_count, put_count = sys.argv[1:4]
+event_limit = int(sys.argv[4])
+journal_limit = int(sys.argv[5])
+
+collect_list = (
+    config.get("logs", {})
+    .get("logs_collected", {})
+    .get("files", {})
+    .get("collect_list", [])
+)
+expected = []
+for entry in collect_list if isinstance(collect_list, list) else []:
+    if not isinstance(entry, dict):
+        continue
+    expected.append(
+        (
+            str(entry.get("log_group_name") or ""),
+            str(entry.get("log_stream_name") or ""),
+            str(entry.get("file_path") or ""),
+        )
+    )
+
+destination_stats = {}
+events = []
+recent_put_requests = 0
+records = journal.get("requests", []) if isinstance(journal, dict) else []
+for record in records if isinstance(records, list) else []:
+    if not isinstance(record, dict):
+        continue
+    request = record.get("request") if isinstance(record.get("request"), dict) else record
+    if header_value(request, "X-Amz-Target") != "Logs_20140328.PutLogEvents":
+        continue
+    recent_put_requests += 1
+    body = request_body(request)
+    group = str(body.get("logGroupName") or "")
+    stream = str(body.get("logStreamName") or "")
+    key = (group, stream)
+    stat = destination_stats.setdefault(key, {"requests": 0, "events": 0})
+    stat["requests"] += 1
+    log_events = body.get("logEvents")
+    if not isinstance(log_events, list):
+        log_events = []
+    stat["events"] += len(log_events)
+    for event in log_events:
+        if not isinstance(event, dict):
+            continue
+        events.append(
+            {
+                "timestamp": event.get("timestamp"),
+                "group": group,
+                "stream": stream,
+                "message": event.get("message", ""),
+            }
+        )
+
+print("")
+print("════════════ CloudWatch Logs 偽装送達レポート ════════════")
+print(f"WireMock API 受信総数: CreateLogGroup={create_group_count}, "
+      f"CreateLogStream={create_stream_count}, PutLogEvents={put_count}")
+print(f"直近 {journal_limit} リクエスト内で解析した PutLogEvents: {recent_put_requests} 件")
+print("")
+print("[cwagent 設定と受信先の照合]")
+if expected:
+    for group, stream, file_path in expected:
+        stat = destination_stats.get((group, stream), {"requests": 0, "events": 0})
+        state = "OK" if stat["requests"] > 0 and stat["events"] > 0 else "未確認"
+        print(f"  [{state}] {file_path}")
+        print(f"         log group : {clean_text(group)}")
+        print(f"         log stream: {clean_text(stream)}")
+        print(f"         requests={stat['requests']}, events={stat['events']}")
+else:
+    print("  [WARN] cwagent 設定から collect_list を取得できませんでした。")
+
+expected_keys = {(group, stream) for group, stream, _ in expected}
+unexpected = [key for key in destination_stats if key not in expected_keys]
+if unexpected:
+    print("")
+    print("[設定外の受信先]")
+    for group, stream in sorted(unexpected):
+        stat = destination_stats[(group, stream)]
+        print(f"  {clean_text(group)} / {clean_text(stream)} "
+              f"(requests={stat['requests']}, events={stat['events']})")
+
+print("")
+print(f"[受信ログイベント（新しい順、最大 {event_limit} 件）]")
+events.sort(key=lambda event: float(event["timestamp"] or 0), reverse=True)
+if not events:
+    print("  PutLogEvents のログイベント本文は確認できませんでした。")
+else:
+    for event in events[:event_limit]:
+        print(f"  {event_time(event['timestamp'])} "
+              f"{clean_text(event['group'], 160)} / {clean_text(event['stream'], 160)}")
+        print(f"    {clean_text(event['message'])}")
+print("═══════════════════════════════════════════════════════════")
+PY
+}
+
+run_cloudwatch_logs_delivery_helper() {
+  local selected_service="$1" cwagent_service="cwagent"
+  local cwagent_id cwagent_config journal create_group_count create_stream_count put_count
+  local agent_logs agent_diagnostics
+  local -a cwagent_ids=()
+
+  require_observability_tools || return 1
+  mapfile -t cwagent_ids < <(compose_container_ids "$cwagent_service")
+  if [ ${#cwagent_ids[@]} -eq 0 ]; then
+    err "CloudWatch Logs 送信元の Compose サービス 'cwagent' が実行中ではありません。"
+    return 1
+  fi
+  cwagent_id="${cwagent_ids[0]}"
+  if ! cwagent_config="$(docker exec "$cwagent_id" cat /etc/cwagentconfig/cwagent-config.json 2>/dev/null)"; then
+    warn "cwagent の設定ファイルを取得できないため、送信先との自動照合は限定されます。"
+    cwagent_config='{}'
+  fi
+
+  resolve_compose_service_http_endpoint "cloudwatch-logs-mock" "8080" || return 1
+  diag ""
+  diag "CloudWatch Agent → CloudWatch Logs 偽装サービスの送達を確認します。"
+  diag "選択サービス: ${selected_service} / mock: ${OBSERVABILITY_CONTAINER_NAME}"
+  diag "WireMock request journal: ${OBSERVABILITY_HTTP_BASE_URL}"
+  diag "注意: 実 AWS CloudWatch Logs ではなく、Compose 内 WireMock の受信記録を確認します。"
+
+  create_group_count="$(wiremock_request_count "$OBSERVABILITY_HTTP_BASE_URL" "Logs_20140328.CreateLogGroup" || printf '?')"
+  create_stream_count="$(wiremock_request_count "$OBSERVABILITY_HTTP_BASE_URL" "Logs_20140328.CreateLogStream" || printf '?')"
+  put_count="$(wiremock_request_count "$OBSERVABILITY_HTTP_BASE_URL" "Logs_20140328.PutLogEvents" || printf '?')"
+  if ! journal="$(observability_http_get "${OBSERVABILITY_HTTP_BASE_URL}/__admin/requests?limit=${OBSERVABILITY_WIREMOCK_REQUEST_LIMIT}")"; then
+    err "cloudwatch-logs-mock の request journal を取得できませんでした。"
+    return 1
+  fi
+
+  if ! render_cloudwatch_delivery_report "$cwagent_config" "$journal" \
+      "$create_group_count" "$create_stream_count" "$put_count" >&2; then
+    err "CloudWatch Logs 偽装送達レポートを生成できませんでした。"
+    return 1
+  fi
+
+  if agent_logs="$(compose_logs "$cwagent_service" 2>/dev/null)"; then
+    agent_diagnostics="$(
+      printf '%s\n' "$agent_logs" | strip_ansi_codes \
+        | grep -Ei '(^|[[:space:]])(E!|W!|ERROR|WARN|failed|denied|timeout)' \
+        | tail -n 20 || true
+    )"
+    diag ""
+    diag "[cwagent の警告・エラー（最大 20 行）]"
+    if [ -n "$agent_diagnostics" ]; then
+      printf '%s\n' "$agent_diagnostics" >&2
+    else
+      diag "  今回の起動以降に該当する警告・エラーは見つかりませんでした。"
+    fi
+  fi
+  diag ""
+  diag "判定基準: 設定済み log group / log stream に PutLogEvents とイベント本文があれば送達確認済みです。"
+  diag "未確認の場合は cwagent の force_flush_interval (対象構成は 5 秒) 以上待ってから再実行してください。"
+  diag "メッセージには機微情報が含まれ得るため、共有・ログ保存時の取り扱いに注意してください。"
+}
+
+find_first_running_compose_service() {
+  local candidate
+  local -a candidate_ids=()
+
+  for candidate in "$@"; do
+    candidate_ids=()
+    mapfile -t candidate_ids < <(compose_container_ids "$candidate")
+    if [ ${#candidate_ids[@]} -gt 0 ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+extract_jaeger_services() {
+  local services_json="$1"
+
+  "$OBSERVABILITY_PYTHON" - 3< <(printf '%s' "$services_json") <<'PY'
+import json
+import os
+import sys
+
+try:
+    with os.fdopen(3, encoding="utf-8") as stream:
+        document = json.load(stream)
+except Exception as exc:
+    print(f"[ERROR] Jaeger サービス一覧の JSON を解析できません: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+
+services = document.get("data", []) if isinstance(document, dict) else []
+if not isinstance(services, list):
+    print("[ERROR] Jaeger サービス一覧の data が配列ではありません。", file=sys.stderr)
+    raise SystemExit(2)
+for service in services:
+    if isinstance(service, str) and service:
+        print(service)
+PY
+}
+
+# Jaeger Query API の応答から、トレース、スパン、親子関係、リソース属性、
+# スパン属性、イベントを人間が追いやすい形式へ整形する。
+render_jaeger_trace_report() {
+  local traces_json="$1" selected_trace_service="$2"
+
+  "$OBSERVABILITY_PYTHON" - "$selected_trace_service" \
+      3< <(printf '%s' "$traces_json") <<'PY'
+import datetime
+import json
+import os
+import re
+import sys
+
+
+SENSITIVE_KEY = re.compile(
+    r"(?i)(password|passwd|pwd|secret|token|authorization|cookie|api[._-]?key|credential)"
+)
+SENSITIVE_TEXT = re.compile(
+    r"(?i)\b(password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)"
+    r"(\s*[:=]\s*)([^\s,;]+)"
+)
+
+
+def load_document():
+    try:
+        with os.fdopen(3, encoding="utf-8") as stream:
+            return json.load(stream)
+    except Exception as exc:
+        print(f"[ERROR] Jaeger トレース JSON を解析できません: {exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def clean_value(key, value, limit=300):
+    if SENSITIVE_KEY.search(str(key)):
+        return "[REDACTED]"
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    elif value is None:
+        text = ""
+    else:
+        text = str(value)
+    text = text.replace("\r", "\\r").replace("\n", "\\n").replace("\t", "\\t")
+    text = SENSITIVE_TEXT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text
+    )
+    return text if len(text) <= limit else text[:limit] + "...(省略)"
+
+
+def tags_as_pairs(tags):
+    pairs = []
+    for tag in tags if isinstance(tags, list) else []:
+        if not isinstance(tag, dict):
+            continue
+        pairs.append((str(tag.get("key") or ""), tag.get("value")))
+    return pairs
+
+
+def micros_to_time(value):
+    try:
+        stamp = float(value) / 1_000_000.0
+        return datetime.datetime.fromtimestamp(
+            stamp, datetime.timezone.utc
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    except Exception:
+        return clean_value("time", value)
+
+
+def millis(value):
+    try:
+        return f"{float(value) / 1000.0:.3f} ms"
+    except Exception:
+        return clean_value("duration", value)
+
+
+def span_is_error(span):
+    values = {key: value for key, value in tags_as_pairs(span.get("tags"))}
+    error_value = values.get("error")
+    status = str(values.get("otel.status_code") or values.get("status.code") or "").upper()
+    return error_value is True or str(error_value).lower() == "true" or status == "ERROR"
+
+
+def trace_start(trace):
+    starts = [
+        span.get("startTime")
+        for span in trace.get("spans", [])
+        if isinstance(span, dict) and isinstance(span.get("startTime"), (int, float))
+    ]
+    return min(starts) if starts else 0
+
+
+document = load_document()
+selected_service = sys.argv[1]
+traces = document.get("data", []) if isinstance(document, dict) else []
+if not isinstance(traces, list):
+    print("[ERROR] Jaeger トレース応答の data が配列ではありません。", file=sys.stderr)
+    raise SystemExit(2)
+traces = [trace for trace in traces if isinstance(trace, dict)]
+traces.sort(key=trace_start, reverse=True)
+
+print("")
+print("════════════ X-Ray 代替 Jaeger トレースレポート ════════════")
+print(f"検索サービス: {clean_value('service', selected_service)}")
+print(f"取得トレース: {len(traces)} 件")
+if not traces:
+    print("  Jaeger にトレースがありません。アプリへリクエストを送り、")
+    print("  app → Collector → Jaeger の順にログと接続先を確認してください。")
+    print("════════════════════════════════════════════════════════════")
+    raise SystemExit(0)
+
+for trace_index, trace in enumerate(traces, 1):
+    trace_id = str(trace.get("traceID") or "(unknown)")
+    spans = [span for span in trace.get("spans", []) if isinstance(span, dict)]
+    spans.sort(key=lambda span: span.get("startTime") or 0)
+    processes = trace.get("processes") if isinstance(trace.get("processes"), dict) else {}
+    services = sorted(
+        {
+            str(process.get("serviceName"))
+            for process in processes.values()
+            if isinstance(process, dict) and process.get("serviceName")
+        }
+    )
+    starts = [
+        span.get("startTime")
+        for span in spans
+        if isinstance(span.get("startTime"), (int, float))
+    ]
+    ends = [
+        span.get("startTime") + span.get("duration")
+        for span in spans
+        if isinstance(span.get("startTime"), (int, float))
+        and isinstance(span.get("duration"), (int, float))
+    ]
+    start = min(starts) if starts else 0
+    duration = max(ends) - start if start and ends else 0
+    error_count = sum(1 for span in spans if span_is_error(span))
+
+    print("")
+    print(f"[Trace {trace_index}] traceID={clean_value('traceID', trace_id, 80)}")
+    print(f"  開始={micros_to_time(start)}, 所要時間={millis(duration)}, "
+          f"spans={len(spans)}, errorSpans={error_count}")
+    print(f"  services={', '.join(clean_value('service', name, 120) for name in services) or '(unknown)'}")
+
+    if processes:
+        print("  [リソース]")
+        for process_id, process in sorted(processes.items()):
+            if not isinstance(process, dict):
+                continue
+            service_name = clean_value("service", process.get("serviceName") or "(unknown)", 120)
+            print(f"    {clean_value('processID', process_id, 80)}: service.name={service_name}")
+            process_tags = tags_as_pairs(process.get("tags"))
+            for key, value in process_tags[:20]:
+                print(f"      {clean_value('key', key, 120)}={clean_value(key, value)}")
+            if len(process_tags) > 20:
+                print(f"      ... {len(process_tags) - 20} 属性を省略")
+
+    print("  [スパン]")
+    for span_index, span in enumerate(spans[:50], 1):
+        process = processes.get(span.get("processID"), {})
+        service_name = (
+            process.get("serviceName")
+            if isinstance(process, dict)
+            else "(unknown)"
+        )
+        references = span.get("references") if isinstance(span.get("references"), list) else []
+        parent_refs = []
+        for reference in references:
+            if not isinstance(reference, dict):
+                continue
+            parent_refs.append(
+                f"{reference.get('refType', 'REF')}:{reference.get('spanID', '?')}"
+            )
+        relative_start = 0
+        if start and isinstance(span.get("startTime"), (int, float)):
+            relative_start = span.get("startTime") - start
+        error_marker = " ERROR" if span_is_error(span) else ""
+        print(
+            f"    {span_index}. [{clean_value('service', service_name, 100)}] "
+            f"{clean_value('operationName', span.get('operationName') or '(unknown)', 180)}"
+            f"{error_marker}"
+        )
+        print(
+            f"       spanID={clean_value('spanID', span.get('spanID') or '?', 80)}, "
+            f"parent={clean_value('parent', ','.join(parent_refs) or '(root)', 180)}, "
+            f"offset={millis(relative_start)}, duration={millis(span.get('duration') or 0)}"
+        )
+        span_tags = tags_as_pairs(span.get("tags"))
+        if span_tags:
+            print("       attributes:")
+            for key, value in span_tags[:30]:
+                print(f"         {clean_value('key', key, 140)}={clean_value(key, value)}")
+            if len(span_tags) > 30:
+                print(f"         ... {len(span_tags) - 30} 属性を省略")
+
+        span_logs = span.get("logs") if isinstance(span.get("logs"), list) else []
+        if span_logs:
+            print("       events:")
+            for event in span_logs[:10]:
+                if not isinstance(event, dict):
+                    continue
+                print(f"         - {micros_to_time(event.get('timestamp'))}")
+                fields = tags_as_pairs(event.get("fields"))
+                for key, value in fields[:20]:
+                    print(f"             {clean_value('key', key, 140)}={clean_value(key, value)}")
+                if len(fields) > 20:
+                    print(f"             ... {len(fields) - 20} フィールドを省略")
+            if len(span_logs) > 10:
+                print(f"         ... {len(span_logs) - 10} イベントを省略")
+    if len(spans) > 50:
+        print(f"    ... {len(spans) - 50} スパンを省略")
+
+print("")
+print("════════════════════════════════════════════════════════════")
+PY
+}
+
+run_otel_jaeger_trace_helper() {
+  local selected_service="$1" collector_service="" collector_id=""
+  local jaeger_service="jaeger" services_json services_text selected_trace_service traces_json
+  local collector_logs collector_evidence choice index _service_index
+  local -a collector_ids=() trace_services=()
+
+  require_observability_tools || return 1
+  case "$selected_service" in
+    otel|adot-collector)
+      collector_service="$selected_service"
+      ;;
+    jaeger)
+      collector_service="$(find_first_running_compose_service adot-collector otel || true)"
+      ;;
+  esac
+
+  if [ -n "$collector_service" ]; then
+    mapfile -t collector_ids < <(compose_container_ids "$collector_service")
+    if [ ${#collector_ids[@]} -gt 0 ]; then
+      collector_id="${collector_ids[0]}"
+      if docker exec "$collector_id" /healthcheck >/dev/null 2>&1; then
+        log "OTel Collector ヘルスチェック: OK (service=${collector_service})"
+      else
+        warn "OTel Collector の /healthcheck が失敗しました (service=${collector_service})。"
+      fi
+
+      if collector_logs="$(compose_logs "$collector_service" 2>/dev/null)"; then
+        collector_evidence="$(
+          printf '%s\n' "$collector_logs" | strip_ansi_codes \
+            | grep -Ei 'TracesExporter|resource spans|[[:space:]]spans([:=]|[[:space:]])' \
+            | tail -n 10 || true
+        )"
+        diag ""
+        diag "[Collector のスパン受信根拠（最大 10 行）]"
+        if [ -n "$collector_evidence" ]; then
+          printf '%s\n' "$collector_evidence" >&2
+        else
+          warn "今回の起動以降の Collector ログにスパン受信を示す行が見つかりません。"
+        fi
+      fi
+    fi
+  else
+    warn "実行中の OTel Collector サービス (adot-collector / otel) を見つけられないため、Jaeger 側だけを確認します。"
+  fi
+
+  resolve_compose_service_http_endpoint "$jaeger_service" "16686" || return 1
+  diag ""
+  diag "OTel Collector → X-Ray 偽装 Jaeger のトレース送達を確認します。"
+  diag "Jaeger Query API: ${OBSERVABILITY_HTTP_BASE_URL}"
+  diag "注意: これは Compose 内 Jaeger への送達確認であり、実 AWS X-Ray への送信確認ではありません。"
+  if ! services_json="$(observability_http_get "${OBSERVABILITY_HTTP_BASE_URL}/api/services")"; then
+    err "Jaeger Query API からサービス一覧を取得できませんでした。"
+    return 1
+  fi
+  if ! services_text="$(extract_jaeger_services "$services_json")"; then
+    return 1
+  fi
+  while IFS= read -r selected_trace_service; do
+    [ -n "$selected_trace_service" ] && trace_services+=("$selected_trace_service")
+  done <<< "$services_text"
+  if [ ${#trace_services[@]} -eq 0 ]; then
+    warn "Jaeger にトレースサービスが登録されていません。アプリへリクエストを送ってから再確認してください。"
+    return 0
+  fi
+
+  diag ""
+  diag "Jaeger で確認するトレースサービスを選択してください:"
+  for _service_index in "${!trace_services[@]}"; do
+    diag "  $(( _service_index + 1 ))) ${trace_services[$_service_index]}"
+  done
+  diag "  0) トレース確認を中止"
+  while :; do
+    printf '選択番号 [0-%s]: ' "${#trace_services[@]}" >&2
+    if ! IFS= read -r choice; then
+      err "Jaeger トレースサービスの選択を読み取れませんでした。"
+      return 1
+    fi
+    case "$choice" in
+      0)
+        log "Jaeger トレース確認を中止しました。"
+        return 0
+        ;;
+      ''|*[!0-9]*|0*)
+        warn "0 から ${#trace_services[@]} の番号を入力してください。"
+        ;;
+      *)
+        if [ "$choice" -ge 1 ] 2>/dev/null \
+            && [ "$choice" -le ${#trace_services[@]} ] 2>/dev/null; then
+          index=$(( choice - 1 ))
+          selected_trace_service="${trace_services[$index]}"
+          break
+        fi
+        warn "0 から ${#trace_services[@]} の番号を入力してください。"
+        ;;
+    esac
+  done
+
+  if ! traces_json="$(
+    curl -sS --noproxy '*' --max-time "$URL_TIMEOUT" --get \
+      --data-urlencode "service=${selected_trace_service}" \
+      --data-urlencode "limit=${OBSERVABILITY_TRACE_LIMIT}" \
+      --data-urlencode "lookback=1h" \
+      "${OBSERVABILITY_HTTP_BASE_URL}/api/traces"
+  )"; then
+    err "Jaeger Query API からトレースを取得できませんでした: ${selected_trace_service}"
+    return 1
+  fi
+  if ! render_jaeger_trace_report "$traces_json" "$selected_trace_service" >&2; then
+    err "Jaeger トレースレポートを生成できませんでした。"
+    return 1
+  fi
+  diag "トレース属性・イベントには機微情報が含まれ得るため、共有・ログ保存時の取り扱いに注意してください。"
+}
+
+# 選択済み Compose サービスについて、ログ表示、対話式 bash 接続、
+# 対応サービスのローカル可観測性診断を繰り返す。
+# 0 を選択すると、起動中 Compose サービスの選択へ戻る。
+compose_service_observability_helper_kind() {
+  case "$1" in
+    cwagent|cloudwatch-logs-mock) printf 'cloudwatch\n' ;;
+    otel|adot-collector|jaeger) printf 'xray\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+pause_compose_service_actions() {
+  printf 'Enter キーでサービス操作の選択へ戻ります: ' >&2
+  if ! IFS= read -r; then
+    err "サービス操作の選択へ戻るための入力を読み取れませんでした。"
+    return 1
+  fi
+}
+
+run_interactive_compose_service_actions() {
+  local service_name="$1" action helper_kind="" max_action=2
+
+  helper_kind="$(compose_service_observability_helper_kind "$service_name" || true)"
+  [ -n "$helper_kind" ] && max_action=3
+  while :; do
+    diag ""
+    diag "Compose サービス '${service_name}' で実行する操作を選択してください:"
+    diag "  1) ログを表示"
+    diag "  2) bash へ接続 (cd・任意コマンドを実行可能)"
+    case "$helper_kind" in
+      cloudwatch)
+        diag "  3) CloudWatch Logs 偽装送達を確認 (ロググループ / ストリーム / イベント)"
+        ;;
+      xray)
+        diag "  3) X-Ray 偽装 Jaeger のトレースを確認 (サービス / トレース / スパン)"
+        ;;
+    esac
+    diag "  0) Compose サービスの選択へ戻る"
+    printf '選択番号 [0-%s]: ' "$max_action" >&2
+    if ! IFS= read -r action; then
+      err "Compose サービス操作の選択を読み取れませんでした。対話可能な端末から実行してください。"
+      return 1
+    fi
+
+    case "$action" in
+      1)
+        if ! show_interactive_compose_service_logs "$service_name"; then
+          warn "ログ表示に失敗しました。サービス操作の選択へ戻ります。"
+        fi
+        pause_compose_service_actions || return 1
+        ;;
+      2)
+        if ! run_interactive_compose_bash "$service_name"; then
+          warn "bash 接続に失敗しました。サービス操作の選択へ戻ります。"
+        fi
+        ;;
+      3)
+        case "$helper_kind" in
+          cloudwatch)
+            if ! run_cloudwatch_logs_delivery_helper "$service_name"; then
+              warn "CloudWatch Logs 偽装送達の確認に失敗しました。"
+            fi
+            ;;
+          xray)
+            if ! run_otel_jaeger_trace_helper "$service_name"; then
+              warn "X-Ray 偽装 Jaeger のトレース確認に失敗しました。"
+            fi
+            ;;
+          *)
+            warn "0 から ${max_action} の番号を入力してください。"
+            continue
+            ;;
+        esac
+        pause_compose_service_actions || return 1
+        ;;
+      0)
+        log "Compose サービス '${service_name}' の操作を終了し、サービス選択へ戻ります。"
+        return 0
+        ;;
+      *)
+        warn "0 から ${max_action} の番号を入力してください。"
+        ;;
+    esac
+  done
+}
+
+# 起動中の Compose サービスを番号で選択し、サービス操作メニューを表示する。
+# サービス操作から戻るたびに最新の一覧を再取得し、0 が選択されるまで繰り返す。
+run_interactive_compose_service_menu() {
+  local choice index service_name _service_index
+  local -a started_services=()
+
+  while :; do
+    started_services=()
+    mapfile -t started_services < <(compose_started_services)
+    if [ ${#started_services[@]} -eq 0 ]; then
+      err "対話操作できる起動中の Compose サービスが見つかりません。"
+      return 1
+    fi
+
+    diag ""
+    diag "操作する起動中の Compose サービスを選択してください:"
+    for _service_index in "${!started_services[@]}"; do
+      diag "  $(( _service_index + 1 ))) ${started_services[$_service_index]}"
+    done
+    diag "  0) 対話操作を終了"
+
+    while :; do
+      printf '選択番号 [0-%s]: ' "${#started_services[@]}" >&2
+      if ! IFS= read -r choice; then
+        err "Compose サービスの選択を読み取れませんでした。対話可能な端末から実行してください。"
+        return 1
+      fi
+      case "$choice" in
+        0)
+          log "Compose サービスの対話操作を終了しました。"
+          return 0
+          ;;
+        ''|*[!0-9]*|0*)
+          warn "0 から ${#started_services[@]} の番号を入力してください。"
+          ;;
+        *)
+          if [ "$choice" -ge 1 ] 2>/dev/null \
+              && [ "$choice" -le ${#started_services[@]} ] 2>/dev/null; then
+            index=$(( choice - 1 ))
+            break
+          fi
+          warn "0 から ${#started_services[@]} の番号を入力してください。"
+          ;;
+      esac
+    done
+
+    service_name="${started_services[$index]}"
+    run_interactive_compose_service_actions "$service_name" || return 1
+  done
+}
+
 run_keep_container_interaction() {
   [ -n "$KEEP_CONTAINER_MODE" ] || return 0
   if [ "$DRY_RUN" = "true" ]; then
@@ -2335,13 +3257,16 @@ run_keep_container_interaction() {
       http)
         log "[DRY-RUN] JBoss EAP のコンテキストルートと HTTP ポートを解決し、パス・GET/POST・POST ボディ形式の対話入力後に curl を実行します。"
         ;;
+      logs)
+        log "[DRY-RUN] 起動中の Compose サービスを番号で選択し、ログ表示、対話式 bash 接続、cwagent / OTel のローカル送達診断を繰り返し実行します。"
+        ;;
     esac
     return 0
   fi
 
-  select_interaction_target || return 1
   case "$KEEP_CONTAINER_MODE" in
     bash)
+      select_interaction_target || return 1
       diag ""
       diag "検証対象コンテナの bash へ接続します (service=${INTERACTION_SERVICE_NAME}, container=${INTERACTION_CONTAINER_NAME})。"
       diag "bash を終了してもコンテナは起動状態のまま残ります。"
@@ -2352,7 +3277,11 @@ run_keep_container_interaction() {
       log "コンテナの bash セッションを終了しました。コンテナは起動状態を維持します。"
       ;;
     http)
+      select_interaction_target || return 1
       run_interactive_http_request || return 1
+      ;;
+    logs)
+      run_interactive_compose_service_menu || return 1
       ;;
   esac
   return 0

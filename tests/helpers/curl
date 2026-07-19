@@ -8,6 +8,7 @@ fi
 
 output_file=""
 body_from_stdin="false"
+request_url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o|--output)
@@ -18,10 +19,17 @@ while [ $# -gt 0 ]; do
       [ "${2:-}" = "@-" ] && body_from_stdin="true"
       shift 2
       ;;
+    --data-urlencode)
+      shift 2
+      ;;
     -w|--write-out|-X|--request|-H|--header|--data|--data-raw|-m|--max-time|--noproxy)
       shift 2
       ;;
-    -s|-S|-sS|-k)
+    -s|-S|-sS|-k|--get)
+      shift
+      ;;
+    http://*|https://*)
+      request_url="$1"
       shift
       ;;
     *)
@@ -30,12 +38,63 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+request_body=""
 if [ "$body_from_stdin" = "true" ]; then
   request_body="$(cat)"
   if [ -n "${FAKE_CURL_CALLS:-}" ]; then
     printf 'request-body=%s\n' "$request_body" >> "$FAKE_CURL_CALLS"
   fi
 fi
+
+case "$request_url" in
+  */__admin/requests/count)
+    case "$request_body" in
+      *Logs_20140328.CreateLogGroup*)
+        printf '{"count":%s}\n' "${FAKE_CLOUDWATCH_CREATE_GROUP_COUNT:-2}"
+        ;;
+      *Logs_20140328.CreateLogStream*)
+        printf '{"count":%s}\n' "${FAKE_CLOUDWATCH_CREATE_STREAM_COUNT:-2}"
+        ;;
+      *Logs_20140328.PutLogEvents*)
+        printf '{"count":%s}\n' "${FAKE_CLOUDWATCH_PUT_COUNT:-3}"
+        ;;
+      *)
+        printf '{"count":0}\n'
+        ;;
+    esac
+    exit "${FAKE_OBSERVABILITY_CURL_EXIT_STATUS:-0}"
+    ;;
+  */__admin/requests\?limit=*)
+    if [ -n "${FAKE_CLOUDWATCH_JOURNAL_FILE:-}" ]; then
+      cat "$FAKE_CLOUDWATCH_JOURNAL_FILE"
+    elif [ -n "${FAKE_CLOUDWATCH_JOURNAL_BODY:-}" ]; then
+      printf '%s\n' "$FAKE_CLOUDWATCH_JOURNAL_BODY"
+    else
+      printf '%s\n' '{"requests":[],"meta":{"total":0}}'
+    fi
+    exit "${FAKE_OBSERVABILITY_CURL_EXIT_STATUS:-0}"
+    ;;
+  */api/services)
+    if [ -n "${FAKE_JAEGER_SERVICES_FILE:-}" ]; then
+      cat "$FAKE_JAEGER_SERVICES_FILE"
+    elif [ -n "${FAKE_JAEGER_SERVICES_BODY:-}" ]; then
+      printf '%s\n' "$FAKE_JAEGER_SERVICES_BODY"
+    else
+      printf '%s\n' '{"data":[]}'
+    fi
+    exit "${FAKE_OBSERVABILITY_CURL_EXIT_STATUS:-0}"
+    ;;
+  */api/traces)
+    if [ -n "${FAKE_JAEGER_TRACES_FILE:-}" ]; then
+      cat "$FAKE_JAEGER_TRACES_FILE"
+    elif [ -n "${FAKE_JAEGER_TRACES_BODY:-}" ]; then
+      printf '%s\n' "$FAKE_JAEGER_TRACES_BODY"
+    else
+      printf '%s\n' '{"data":[]}'
+    fi
+    exit "${FAKE_OBSERVABILITY_CURL_EXIT_STATUS:-0}"
+    ;;
+esac
 
 if [ -z "$output_file" ]; then
   printf 'fake curl: response output file was not specified\n' >&2
