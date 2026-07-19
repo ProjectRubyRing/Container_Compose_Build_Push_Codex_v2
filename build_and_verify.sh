@@ -150,8 +150,10 @@ DIRECTORY_TREE_DEPTH_SET="false"  # 深さが明示指定されたか (ビルド
 DIRECTORY_FILE_LIMIT="none"       # none: ファイル非表示 / all・数値: ファイル表示を有効化
 DIRECTORY_FILE_LIMIT_SET="false"  # 表示上限が明示指定されたか (ビルドのみ実行時の警告用)
 DEPLOYMENT_DIR_ENVS=()            # ディレクトリパスを値に持つ環境変数名 (複数指定可)
-# コンテナ全体ツリーでは、巨大・仮想・実行基盤固有の各ディレクトリ自体だけを
-# 表示し、その配下は探索しない。個別のデプロイ構造表示には適用しない。
+# コンテナ全体ツリーでは、巨大・仮想・実行基盤固有の各ディレクトリ配下を
+# 探索しない。通常はディレクトリ自体を 1 ノードとして表示するが、
+# DIRECTORY_TREE_HIDDEN_PATHS に含まれるパスはそのノードも表示しない。
+# 個別のデプロイ構造表示には適用しない。
 DIRECTORY_TREE_PRUNE_PATHS=(
   /afs
   /aws
@@ -170,6 +172,17 @@ DIRECTORY_TREE_PRUNE_PATHS=(
   /sys
   /usr/lib
   /usr/lib64
+)
+# /share 配下の実行基盤固有ディレクトリは、枝刈りするだけでなく画面と
+# 全量レポートの双方からディレクトリ自体も除外する。
+DIRECTORY_TREE_HIDDEN_PATHS=(
+  /share/X11
+  /share/doc
+  /share/icons
+  /share/licenses
+  /share/man
+  /share/osinfo
+  /share/zoneinfo
 )
 
 # ---- 全量ビルドレポート出力 --------------------------------------------------
@@ -1244,9 +1257,11 @@ append_container_directory_tree_report() {
   local file_max_depth directory file_path parent filename suffix extension key count file_count
   local failure_message
   local display_name extension_list filename_list ancestor prefix connector is_last index
+  local hidden_path hide_directory
   local -a directory_find_args=()
   local -a file_find_args=()
   local -a directory_paths=()
+  local -a visible_directory_paths=()
   local -a ancestor_chain=()
   local -a leaf_entries=()
   local -A extension_counts=()
@@ -1375,6 +1390,19 @@ append_container_directory_tree_report() {
   # 正しく選択できるようにする。ファイル行は各親の先頭、ディレクトリ行は
   # その後に出すため、最後の子ディレクトリが親全体の最後のノードになる。
   mapfile -d '' -t directory_paths < <(LC_ALL=C sort -z "$directory_list_tmp")
+  if [ "$root_path" = "/" ] && [ "$report_title" = "コンテナ内ディレクトリツリー" ]; then
+    for directory in "${directory_paths[@]}"; do
+      hide_directory="false"
+      for hidden_path in "${DIRECTORY_TREE_HIDDEN_PATHS[@]}"; do
+        if [ "$directory" = "$hidden_path" ]; then
+          hide_directory="true"
+          break
+        fi
+      done
+      [ "$hide_directory" = "true" ] || visible_directory_paths+=("$directory")
+    done
+    directory_paths=("${visible_directory_paths[@]}")
+  fi
   for directory in "${directory_paths[@]}"; do
     [ "$directory" = "$root_path" ] && continue
     parent="${directory%/*}"
