@@ -172,6 +172,7 @@ DIRECTORY_TREE_PRUNE_PATHS=(
   /opt/jboss-eap/.galleon
   /opt/jboss-eap/modules/system/layers/base
   /proc
+  /share
   /share/X11
   /share/doc
   /share/icons
@@ -182,6 +183,7 @@ DIRECTORY_TREE_PRUNE_PATHS=(
   /sys
   /usr/lib
   /usr/lib64
+  /usr/local
 )
 # /share 配下の実行基盤固有ディレクトリは、枝刈りするだけでなく画面と
 # 全量レポートの双方からディレクトリ自体も除外する。

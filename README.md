@@ -313,10 +313,9 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
   (`archive.tar.gz` は `.gz`、`.env` と末尾がドットの名前は `(拡張子なし)`)。
   件数にかかわらず全ファイル名を出す場合は `--directory-file-limit all` を指定します。
 - コンテナ全体ツリーでは、`/afs`、`/aws`、`/etc`、`/local/aws-cli`、
-  `/opt/jboss-eap/.galleon`、`/opt/jboss-eap/modules/system/layers/base`、`/proc`、`/sys`、
-  `/usr/lib`、`/usr/lib64` 自体は表示しますが、その配下は探索・表示しません。
-- `/share/X11`、`/share/doc`、`/share/icons`、`/share/licenses`、`/share/man`、
-  `/share/osinfo`、`/share/zoneinfo` は、配下だけでなくディレクトリ自体も表示しません。
+  `/opt/jboss-eap/.galleon`、`/opt/jboss-eap/modules/system/layers/base`、`/proc`、`/share`、
+  `/sys`、`/usr/lib`、`/usr/lib64`、`/usr/local` 自体は表示しますが、その配下は
+  探索・表示しません。
   この除外は画面表示と全量レポートの両方へ適用します。
 - コンテナ全体のツリーに続けて、`*/standalone/deployments`、
   展開済み Web アプリケーションの `WEB-INF` の親、Java クラスパスルートの

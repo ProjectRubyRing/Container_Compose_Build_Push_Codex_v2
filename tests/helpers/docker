@@ -418,6 +418,8 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
         "/usr/lib/jvm"
         "/usr/lib64"
         "/usr/lib64/lib64-hidden"
+        "/usr/local"
+        "/usr/local/usr-local-hidden"
         "/usr/share"
       )
       ;;
@@ -467,6 +469,7 @@ if [ "${1:-}" = "exec" ] && [ "${3:-}" = "find" ]; then
         "/sys/kernel/uevent_seqnum"
         "/usr/lib/libexample.so"
         "/usr/lib64/lib64-hidden.so"
+        "/usr/local/usr-local-hidden.txt"
         "/usr/share/zoneinfo.txt"
       )
       ;;
