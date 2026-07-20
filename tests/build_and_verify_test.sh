@@ -123,7 +123,7 @@ assert_contains "$success_output" "├── etc/"
 assert_contains "$success_output" "├── local/"
 assert_contains "$success_output" "aws-cli/"
 assert_contains "$success_output" "├── proc/"
-assert_contains "$success_output" "├── share/"
+assert_contains "$success_output" "    └── share/"
 assert_contains "$success_output" "├── sys/"
 assert_contains "$success_output" "    ├── lib/"
 assert_contains "$success_output" "lib64/"
@@ -161,12 +161,14 @@ assert_not_contains "$success_output" "aws-cli-hidden.txt"
 assert_not_contains "$success_output" "lib64-hidden.so"
 assert_not_contains "$success_output" "public/"
 assert_not_contains "$success_output" "[ファイル] readme.txt"
+assert_not_contains "$success_output" "zoneinfo.txt"
 assert_not_contains "$success_output" "usr-local-hidden"
 assert_before "$success_output" "環境変数一覧 (サービス: app" "コンテナ内ディレクトリツリー (サービス: app"
 assert_before "$success_output" "コンテナ内ディレクトリツリー (サービス: app" "JBoss EAP デプロイ済み Web アプリケーションのディレクトリ構造"
 assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ app'
-assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / .* -path /afs .* -path /local/aws-cli .* -path /opt/jboss-eap/modules/system/layers/base .* -path /share .* -path /share/X11 .* -path /share/doc .* -path /share/icons .* -path /share/licenses .* -path /share/man .* -path /share/osinfo .* -path /share/zoneinfo .* -path /usr/lib64 .* -path /usr/local .* -prune -print0 -o -type d -print0'
-assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / .* -path /afs .* -path /local/aws-cli .* -path /opt/jboss-eap/modules/system/layers/base .* -path /share .* -path /share/X11 .* -path /share/doc .* -path /share/icons .* -path /share/licenses .* -path /share/man .* -path /share/osinfo .* -path /share/zoneinfo .* -path /usr/lib64 .* -path /usr/local .* -prune -o -type f -print0'
+assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / .* -path /afs .* -path /local/aws-cli .* -path /opt/jboss-eap/modules/system/layers/base .* -path /usr/share .* -path /usr/share/X11 .* -path /usr/share/doc .* -path /usr/share/icons .* -path /usr/share/licenses .* -path /usr/share/man .* -path /usr/share/osinfo .* -path /usr/share/zoneinfo .* -path /usr/lib64 .* -path /usr/local .* -prune -print0 -o -type d -print0'
+assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / .* -path /afs .* -path /local/aws-cli .* -path /opt/jboss-eap/modules/system/layers/base .* -path /usr/share .* -path /usr/share/X11 .* -path /usr/share/doc .* -path /usr/share/icons .* -path /usr/share/licenses .* -path /usr/share/man .* -path /usr/share/osinfo .* -path /usr/share/zoneinfo .* -path /usr/lib64 .* -path /usr/local .* -prune -o -type f -print0'
+assert_not_contains "$FAKE_DOCKER_CALLS" "-path /share "
 assert_matches "$FAKE_DOCKER_CALLS" 'exec cid-app find / -maxdepth 3 .* -type f -print0'
 
 report_files=("$TEST_TMP/reports"/build_and_verify_*.txt)
@@ -190,10 +192,10 @@ assert_contains "$full_report" "Order11.class"
 assert_contains "$full_report" ".galleon/"
 assert_contains "$full_report" "aws-cli/"
 assert_contains "$full_report" "base/"
-assert_contains "$full_report" "├── share/"
+assert_contains "$full_report" "    └── share/"
 assert_contains "$full_report" "    ├── local/"
 assert_contains "$full_report" "lib64/"
-assert_contains "$full_report" "zoneinfo.txt"
+assert_not_contains "$full_report" "zoneinfo.txt"
 assert_not_contains "$full_report" "cache/"
 assert_not_contains "$full_report" "hosts"
 assert_not_contains "$full_report" "ssl/"

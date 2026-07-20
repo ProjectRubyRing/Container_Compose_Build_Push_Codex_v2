@@ -172,29 +172,29 @@ DIRECTORY_TREE_PRUNE_PATHS=(
   /opt/jboss-eap/.galleon
   /opt/jboss-eap/modules/system/layers/base
   /proc
-  /share
-  /share/X11
-  /share/doc
-  /share/icons
-  /share/licenses
-  /share/man
-  /share/osinfo
-  /share/zoneinfo
+  /usr/share
+  /usr/share/X11
+  /usr/share/doc
+  /usr/share/icons
+  /usr/share/licenses
+  /usr/share/man
+  /usr/share/osinfo
+  /usr/share/zoneinfo
   /sys
   /usr/lib
   /usr/lib64
   /usr/local
 )
-# /share 配下の実行基盤固有ディレクトリは、枝刈りするだけでなく画面と
-# 全量レポートの双方からディレクトリ自体も除外する。
+# RHEL 9 / UBI 9 の /usr/share 配下にある実行基盤固有ディレクトリは、
+# 枝刈りするだけでなく画面と全量レポートの双方からディレクトリ自体も除外する。
 DIRECTORY_TREE_HIDDEN_PATHS=(
-  /share/X11
-  /share/doc
-  /share/icons
-  /share/licenses
-  /share/man
-  /share/osinfo
-  /share/zoneinfo
+  /usr/share/X11
+  /usr/share/doc
+  /usr/share/icons
+  /usr/share/licenses
+  /usr/share/man
+  /usr/share/osinfo
+  /usr/share/zoneinfo
 )
 
 # ---- 全量ビルドレポート出力 --------------------------------------------------
