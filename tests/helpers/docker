@@ -74,6 +74,8 @@ if [ "${1:-}" = "compose" ]; then
           cloudwatch-logs-mock) printf 'cid-cloudwatch-logs-mock\n' ;;
           adot-collector|otel) printf 'cid-adot-collector\n' ;;
           jaeger) printf 'cid-jaeger\n' ;;
+          mysql80) printf 'cid-mysql80\n' ;;
+          aurora84) printf 'cid-mysql84\n' ;;
           *) printf 'cid-app\n' ;;
         esac
       fi
@@ -241,6 +243,8 @@ if [ "${1:-}" = "inspect" ]; then
         *"cid-cloudwatch-logs-mock"*) printf '/cloudwatch-logs-mock\n' ;;
         *"cid-adot-collector"*) printf '/adot-collector\n' ;;
         *"cid-jaeger"*) printf '/jaeger\n' ;;
+        *"cid-mysql80"*) printf '/mysql-8.0.42\n' ;;
+        *"cid-mysql84"*) printf '/aurora-mysql-8.4\n' ;;
         *) printf '/test-app-1\n' ;;
       esac
       ;;
@@ -256,6 +260,32 @@ if [ "${1:-}" = "inspect" ]; then
     *)
       fail "$@"
       ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ] && [[ "${2:-}" == cid-mysql* ]] \
+    && [ "${3:-}" = "/bin/sh" ] && [ "${4:-}" = "-c" ] \
+    && [[ "${5:-}" == *"command -v mysql"* ]]; then
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ] && [ "${2:-}" != "-it" ] \
+    && [ "${3:-}" = "/bin/sh" ] && [ "${4:-}" = "-c" ] \
+    && [[ "${5:-}" == *"command -v mysql"* ]]; then
+  exit 1
+fi
+
+if [ "${1:-}" = "exec" ] && [ "${2:-}" = "-it" ] \
+    && [[ "${3:-}" == cid-mysql* ]] && [ "${4:-}" = "/bin/sh" ] \
+    && [ "${5:-}" = "-c" ]; then
+  if [ "${FAKE_MYSQL_CLIENT_FAIL:-false}" = "true" ]; then
+    printf 'fake mysql client connection failed\n' >&2
+    exit 70
+  fi
+  case "${3:-}" in
+    cid-mysql80) printf 'Welcome to the MySQL monitor.  Server version: 8.0.42\n' ;;
+    cid-mysql84) printf 'Welcome to the MySQL monitor.  Server version: 8.4.6\n' ;;
   esac
   exit 0
 fi

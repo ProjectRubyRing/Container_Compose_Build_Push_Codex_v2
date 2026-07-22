@@ -25,8 +25,8 @@
 #                          日時付きテキストファイルへ保存する。
 #   (7) --keep-container-mode: 起動確認後もコンテナを残し、検証対象へ直接
 #                          bash 接続するか、対話式の HTTP リクエスト、または
-#                          起動中 Compose サービスのログ閲覧・bash 接続、および
-#                          cwagent / OTel のローカル送達診断を実行する。
+#                          起動中 Compose サービスのログ閲覧・bash / MySQL 接続、
+#                          および cwagent / OTel のローカル送達診断を実行する。
 #
 # --verify-startup / --verify-url いずれも指定しなければ、純粋にビルドのみを
 # 行って終了する (従来の build_and_push.sh --build-only 相当)。
@@ -321,6 +321,7 @@ JBoss マスターパスワード (BuildKit シークレット):
                              http  JBoss EAP へ対話式の HTTP リクエストを送る
                               logs  起動中 Compose サービスを番号で選択後、
                                     ログ表示または対話式 bash 接続を繰り返す。
+                                    MySQL サーバーでは SQL の対話実行も選択できる。
                                     cwagent / cloudwatch-logs-mock では CloudWatch
                                     Logs 偽装送達、otel / adot-collector / jaeger
                                     では X-Ray 偽装トレースも確認できる
@@ -2389,6 +2390,164 @@ run_interactive_compose_bash() {
   log "コンテナの bash セッションを終了しました。サービス操作の選択へ戻ります。"
 }
 
+# 選択された Compose サービスが MySQL サーバーコンテナかを実行ファイルで判定する。
+# サービス名やイメージタグへ依存せず、MySQL 8.0.42 と
+# MySQL 8.4 / Aurora 8.4 互換系の双方を同じ経路で扱う。
+compose_service_supports_mysql_client() {
+  local service_name="$1" container_id
+  local -a container_ids=()
+
+  mapfile -t container_ids < <(compose_container_ids "$service_name")
+  [ ${#container_ids[@]} -gt 0 ] || return 1
+  container_id="${container_ids[0]}"
+  docker exec "$container_id" /bin/sh -c '
+    command -v mysql >/dev/null 2>&1 \
+      && command -v mysqld >/dev/null 2>&1
+  ' >/dev/null 2>&1
+}
+
+# MySQL コンテナ内の mysql クライアントへ接続し、SQL を対話実行する。
+# 認証情報は Docker のコマンドラインへ含めず、コンテナ内で MYSQL_* または
+# MYSQL_*_FILE から解決して、一時的なクライアントオプションファイルへ格納する。
+run_interactive_compose_mysql() {
+  local service_name="$1" container_id container_name mysql_client_script
+  local -a container_ids=()
+
+  mapfile -t container_ids < <(compose_container_ids "$service_name")
+  if [ ${#container_ids[@]} -eq 0 ]; then
+    err "Compose サービス '${service_name}' の実行中コンテナが見つかりません。"
+    return 1
+  fi
+  container_id="${container_ids[0]}"
+  container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$container_id" 2>/dev/null || printf '%s' "$container_id")")"
+  if [ ${#container_ids[@]} -gt 1 ]; then
+    warn "Compose サービス '${service_name}' は複数コンテナで実行中のため、先頭のコンテナを使用します: ${container_name}"
+  fi
+
+  mysql_client_script="$(cat <<'MYSQL_CLIENT_SCRIPT'
+set -eu
+
+read_mysql_setting() {
+  _mysql_setting_value="$1"
+  _mysql_setting_file="$2"
+  _mysql_setting_name="$3"
+  if [ -n "$_mysql_setting_value" ] && [ -n "$_mysql_setting_file" ]; then
+    printf '%s と %s_FILE を同時には指定できません。\n' \
+      "$_mysql_setting_name" "$_mysql_setting_name" >&2
+    return 64
+  fi
+  if [ -n "$_mysql_setting_file" ]; then
+    if [ ! -r "$_mysql_setting_file" ]; then
+      printf '%s_FILE の参照先を読み取れません: %s\n' \
+        "$_mysql_setting_name" "$_mysql_setting_file" >&2
+      return 66
+    fi
+    cat -- "$_mysql_setting_file"
+  else
+    printf '%s' "$_mysql_setting_value"
+  fi
+}
+
+# MySQL のオプションファイルで意味を持つバイトをエスケープする。
+# LC_ALL=C と od を使い、改行を含む Docker secret も 1 行の値として安全に記録する。
+escape_mysql_option_value() {
+  LC_ALL=C od -An -v -t u1 | LC_ALL=C awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        byte = $i + 0
+        if (byte == 8) {
+          printf "\\b"
+        } else if (byte == 9) {
+          printf "\\t"
+        } else if (byte == 10) {
+          printf "\\n"
+        } else if (byte == 13) {
+          printf "\\r"
+        } else if (byte == 34) {
+          printf "\\\""
+        } else if (byte == 92) {
+          printf "\\\\"
+        } else {
+          printf "%c", byte
+        }
+      }
+    }
+  '
+}
+
+for mysql_required_command in mysql mktemp od awk cat rm; do
+  if ! command -v "$mysql_required_command" >/dev/null 2>&1; then
+    printf 'MySQL 接続に必要なコマンドがコンテナ内に見つかりません: %s\n' \
+      "$mysql_required_command" >&2
+    exit 127
+  fi
+done
+
+mysql_configured_user="$(read_mysql_setting \
+  "${MYSQL_USER:-}" "${MYSQL_USER_FILE:-}" MYSQL_USER)" || exit $?
+mysql_database="$(read_mysql_setting \
+  "${MYSQL_DATABASE:-}" "${MYSQL_DATABASE_FILE:-}" MYSQL_DATABASE)" || exit $?
+mysql_password_known=false
+
+if [ -n "$mysql_configured_user" ] && [ "$mysql_configured_user" != "root" ]; then
+  mysql_user="$mysql_configured_user"
+  mysql_password="$(read_mysql_setting \
+    "${MYSQL_PASSWORD:-}" "${MYSQL_PASSWORD_FILE:-}" MYSQL_PASSWORD)" || exit $?
+  if [ "${MYSQL_PASSWORD+x}" = "x" ] || [ -n "${MYSQL_PASSWORD_FILE:-}" ]; then
+    mysql_password_known=true
+  fi
+else
+  mysql_user=root
+  mysql_password="$(read_mysql_setting \
+    "${MYSQL_ROOT_PASSWORD:-}" "${MYSQL_ROOT_PASSWORD_FILE:-}" \
+    MYSQL_ROOT_PASSWORD)" || exit $?
+  if [ "${MYSQL_ROOT_PASSWORD+x}" = "x" ] \
+      || [ -n "${MYSQL_ROOT_PASSWORD_FILE:-}" ] \
+      || [ -n "${MYSQL_ALLOW_EMPTY_PASSWORD:-}" ]; then
+    mysql_password_known=true
+  fi
+fi
+
+umask 077
+mysql_option_file="$(mktemp /tmp/build-and-verify-mysql-client.XXXXXX)"
+cleanup_mysql_option_file() {
+  rm -f -- "$mysql_option_file"
+}
+trap cleanup_mysql_option_file EXIT HUP INT TERM
+
+{
+  printf '[client]\n'
+  if [ "$mysql_password_known" = "true" ]; then
+    printf 'password="'
+    printf '%s' "$mysql_password" | escape_mysql_option_value
+    printf '"\n'
+  fi
+} > "$mysql_option_file"
+
+set -- --defaults-extra-file="$mysql_option_file" --protocol=socket --user="$mysql_user"
+if [ "$mysql_password_known" != "true" ]; then
+  printf 'MYSQL_* からパスワードを解決できないため、ユーザー %s のパスワードを入力してください。\n' \
+    "$mysql_user" >&2
+  set -- "$@" --password
+fi
+if [ -n "$mysql_database" ]; then
+  set -- "$@" --database="$mysql_database"
+fi
+mysql "$@"
+MYSQL_CLIENT_SCRIPT
+)"
+
+  diag ""
+  diag "MySQL クライアントへ接続します (service=${service_name}, container=${container_name})。"
+  diag "SQL クエリを対話実行できます。終了するには exit または \\q を入力してください。"
+  diag "MySQL クライアントを終了するとサービス操作の選択へ戻ります。"
+  if ! docker exec -it "$container_id" /bin/sh -c "$mysql_client_script"; then
+    err "Compose サービス '${service_name}' の MySQL クライアントへ接続できませんでした: ${container_name}"
+    return 1
+  fi
+  log "MySQL セッションを終了しました。サービス操作の選択へ戻ります。"
+}
+
 # 可観測性ヘルパーの JSON は認証ヘッダー等を含み得るため、生データを表示せず
 # Python 3 で必要な項目だけを抽出する。logs モード全体の必須依存にはせず、
 # 専用ヘルパーが選択された時点で利用可否を確認する。
@@ -3112,7 +3271,7 @@ run_otel_jaeger_trace_helper() {
   diag "トレース属性・イベントには機微情報が含まれ得るため、共有・ログ保存時の取り扱いに注意してください。"
 }
 
-# 選択済み Compose サービスについて、ログ表示、対話式 bash 接続、
+# 選択済み Compose サービスについて、ログ表示、対話式 bash / MySQL 接続、
 # 対応サービスのローカル可観測性診断を繰り返す。
 # 0 を選択すると、起動中 Compose サービスの選択へ戻る。
 compose_service_observability_helper_kind() {
@@ -3133,20 +3292,31 @@ pause_compose_service_actions() {
 
 run_interactive_compose_service_actions() {
   local service_name="$1" action helper_kind="" max_action=2
+  local mysql_action=0 observability_action=0
 
   helper_kind="$(compose_service_observability_helper_kind "$service_name" || true)"
-  [ -n "$helper_kind" ] && max_action=3
+  if compose_service_supports_mysql_client "$service_name"; then
+    max_action=$(( max_action + 1 ))
+    mysql_action="$max_action"
+  fi
+  if [ -n "$helper_kind" ]; then
+    max_action=$(( max_action + 1 ))
+    observability_action="$max_action"
+  fi
   while :; do
     diag ""
     diag "Compose サービス '${service_name}' で実行する操作を選択してください:"
     diag "  1) ログを表示"
     diag "  2) bash へ接続 (cd・任意コマンドを実行可能)"
+    if [ "$mysql_action" -gt 0 ]; then
+      diag "  ${mysql_action}) MySQL クライアントへ接続 (SQL クエリを対話実行)"
+    fi
     case "$helper_kind" in
       cloudwatch)
-        diag "  3) CloudWatch Logs 偽装送達を確認 (ロググループ / ストリーム / イベント)"
+        diag "  ${observability_action}) CloudWatch Logs 偽装送達を確認 (ロググループ / ストリーム / イベント)"
         ;;
       xray)
-        diag "  3) X-Ray 偽装 Jaeger のトレースを確認 (サービス / トレース / スパン)"
+        diag "  ${observability_action}) X-Ray 偽装 Jaeger のトレースを確認 (サービス / トレース / スパン)"
         ;;
     esac
     diag "  0) Compose サービスの選択へ戻る"
@@ -3168,31 +3338,32 @@ run_interactive_compose_service_actions() {
           warn "bash 接続に失敗しました。サービス操作の選択へ戻ります。"
         fi
         ;;
-      3)
-        case "$helper_kind" in
-          cloudwatch)
-            if ! run_cloudwatch_logs_delivery_helper "$service_name"; then
-              warn "CloudWatch Logs 偽装送達の確認に失敗しました。"
-            fi
-            ;;
-          xray)
-            if ! run_otel_jaeger_trace_helper "$service_name"; then
-              warn "X-Ray 偽装 Jaeger のトレース確認に失敗しました。"
-            fi
-            ;;
-          *)
-            warn "0 から ${max_action} の番号を入力してください。"
-            continue
-            ;;
-        esac
-        pause_compose_service_actions || return 1
-        ;;
       0)
         log "Compose サービス '${service_name}' の操作を終了し、サービス選択へ戻ります。"
         return 0
         ;;
       *)
-        warn "0 から ${max_action} の番号を入力してください。"
+        if [ "$mysql_action" -gt 0 ] && [ "$action" = "$mysql_action" ]; then
+          if ! run_interactive_compose_mysql "$service_name"; then
+            warn "MySQL 接続に失敗しました。サービス操作の選択へ戻ります。"
+          fi
+        elif [ "$observability_action" -gt 0 ] && [ "$action" = "$observability_action" ]; then
+          case "$helper_kind" in
+            cloudwatch)
+              if ! run_cloudwatch_logs_delivery_helper "$service_name"; then
+                warn "CloudWatch Logs 偽装送達の確認に失敗しました。"
+              fi
+              ;;
+            xray)
+              if ! run_otel_jaeger_trace_helper "$service_name"; then
+                warn "X-Ray 偽装 Jaeger のトレース確認に失敗しました。"
+              fi
+              ;;
+          esac
+          pause_compose_service_actions || return 1
+        else
+          warn "0 から ${max_action} の番号を入力してください。"
+        fi
         ;;
     esac
   done
@@ -3260,7 +3431,7 @@ run_keep_container_interaction() {
         log "[DRY-RUN] JBoss EAP のコンテキストルートと HTTP ポートを解決し、パス・GET/POST・POST ボディ形式の対話入力後に curl を実行します。"
         ;;
       logs)
-        log "[DRY-RUN] 起動中の Compose サービスを番号で選択し、ログ表示、対話式 bash 接続、cwagent / OTel のローカル送達診断を繰り返し実行します。"
+        log "[DRY-RUN] 起動中の Compose サービスを番号で選択し、ログ表示、対話式 bash / MySQL 接続、cwagent / OTel のローカル送達診断を繰り返し実行します。"
         ;;
     esac
     return 0
