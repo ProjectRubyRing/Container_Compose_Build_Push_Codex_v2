@@ -478,7 +478,7 @@ assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
 logs_mode_output="$TEST_TMP/keep-mode-logs.out"
 : > "$FAKE_DOCKER_CALLS"
 export FAKE_COMPOSE_PS_SERVICES="app db"
-if ! printf 'invalid\n3\n2\ninvalid\n1\n\n0\n1\n2\n0\n0\n' | (
+if ! printf 'invalid\n3\n2\ninvalid\n1\n\n0\n1\n2\n3\n\n0\n0\n' | (
   cd "$REPO_ROOT"
   bash ./build_and_verify.sh \
     --compose-service app,db \
@@ -498,11 +498,13 @@ unset FAKE_COMPOSE_PS_SERVICES
 assert_occurrences "$logs_mode_output" "操作する起動中の Compose サービスを選択してください:" 3
 assert_occurrences "$logs_mode_output" "  1) app" 3
 assert_occurrences "$logs_mode_output" "  2) db" 3
-assert_occurrences "$logs_mode_output" "0 から 2 の番号を入力してください。" 3
+assert_occurrences "$logs_mode_output" "0 から 2 の番号を入力してください。" 2
+assert_occurrences "$logs_mode_output" "0 から 3 の番号を入力してください。" 1
 assert_occurrences "$logs_mode_output" "Compose サービス 'db' で実行する操作を選択してください:" 3
-assert_occurrences "$logs_mode_output" "Compose サービス 'app' で実行する操作を選択してください:" 2
-assert_occurrences "$logs_mode_output" "  1) ログを表示" 5
-assert_occurrences "$logs_mode_output" "  2) bash へ接続 (cd・任意コマンドを実行可能)" 5
+assert_occurrences "$logs_mode_output" "Compose サービス 'app' で実行する操作を選択してください:" 3
+assert_occurrences "$logs_mode_output" "  1) ログを表示" 6
+assert_occurrences "$logs_mode_output" "  2) bash へ接続 (cd・任意コマンドを実行可能)" 6
+assert_occurrences "$logs_mode_output" "  3) healthcheck 設定・実行履歴・通信を確認" 6
 assert_not_contains "$logs_mode_output" "MySQL クライアントへ接続 (SQL クエリを対話実行)"
 assert_occurrences "$logs_mode_output" "Compose サービスログ (サービス:" 1
 assert_contains "$logs_mode_output" "Compose サービスログ (サービス: db, 末尾 50/52 行 (指定上限: 50)):"
@@ -513,6 +515,24 @@ assert_not_contains "$logs_mode_output" "DB002: companion service log"
 assert_contains "$logs_mode_output" "Compose サービスの bash へ接続します (service=app, container=test-app-1)。"
 assert_contains "$logs_mode_output" "この bash セッション内では cd によるディレクトリ移動と任意のコマンド実行が可能です。"
 assert_contains "$logs_mode_output" "bash セッションを終了しました。サービス操作の選択へ戻ります。"
+assert_contains "$logs_mode_output" "Docker healthcheck 診断"
+assert_contains "$logs_mode_output" "Compose サービス : app"
+assert_contains "$logs_mode_output" "curl -fs http://127.0.0.1:8080/health >/dev/null || exit 1"
+assert_contains "$logs_mode_output" "現在状態       : healthy"
+assert_contains "$logs_mode_output" "連続失敗回数   : 0"
+assert_contains "$logs_mode_output" "保持された履歴 : 2 件"
+assert_contains "$logs_mode_output" "healthcheck request completed"
+assert_contains "$logs_mode_output" "手動再実行結果 : OK"
+assert_contains "$logs_mode_output" "実行上限   : 60 秒 (--url-timeout)"
+assert_contains "$logs_mode_output" "[HTTP healthcheck 通信詳細（補助リクエスト）]"
+assert_contains "$logs_mode_output" "リクエスト : [GET] http://127.0.0.1:8080/health"
+assert_contains "$logs_mode_output" "HTTP/1.1 200 OK"
+assert_contains "$logs_mode_output" 'Set-Cookie: [REDACTED]'
+assert_contains "$logs_mode_output" '"status":"UP","token":"[REDACTED]"'
+assert_not_contains "$logs_mode_output" "response-cookie-secret"
+assert_not_contains "$logs_mode_output" "response-token-secret"
+assert_contains "$logs_mode_output" "http_status=200"
+assert_contains "$logs_mode_output" "remote=127.0.0.1:8080"
 assert_before "$logs_mode_output" "Compose サービスログ (サービス: db" "Compose サービスの bash へ接続します (service=app"
 assert_contains "$logs_mode_output" "Compose サービス 'db' の操作を終了し、サービス選択へ戻ります。"
 assert_contains "$logs_mode_output" "Compose サービス 'app' の操作を終了し、サービス選択へ戻ります。"
@@ -521,13 +541,101 @@ assert_contains "$logs_mode_output" "コンテナを残します (--keep-contain
 assert_occurrences "$FAKE_DOCKER_CALLS" "compose -f compose.yml ps --services" 3
 assert_matches "$FAKE_DOCKER_CALLS" 'compose -f compose\.yml logs --no-color --since [^ ]+ db'
 assert_contains "$FAKE_DOCKER_CALLS" "exec -it cid-app /bin/bash"
+assert_contains "$FAKE_DOCKER_CALLS" ".Config.Healthcheck.Test"
+assert_contains "$FAKE_DOCKER_CALLS" ".State.Health.Log"
+assert_contains "$FAKE_DOCKER_CALLS" "exec cid-app /bin/sh -c curl -fs http://127.0.0.1:8080/health >/dev/null || exit 1"
+assert_contains "$FAKE_DOCKER_CALLS" "healthcheck-http-probe http://127.0.0.1:8080/health 60 GET"
 assert_not_contains "$FAKE_DOCKER_CALLS" "compose -f compose.yml down"
+
+no_healthcheck_output="$TEST_TMP/keep-mode-no-healthcheck.out"
+: > "$FAKE_DOCKER_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="nohealth"
+if ! printf '1\n3\n\n0\n0\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service nohealth \
+    --startup-service nohealth \
+    --keep-container-mode logs \
+    --suppress-startup-logs \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$no_healthcheck_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES
+  cat "$no_healthcheck_output" >&2
+  fail "service without a healthcheck returned a non-zero status"
+fi
+unset FAKE_COMPOSE_PS_SERVICES
+
+assert_contains "$no_healthcheck_output" "Compose サービス : nohealth"
+assert_contains "$no_healthcheck_output" "設定             : healthcheck は設定されていません。"
+assert_contains "$no_healthcheck_output" "Docker 実行履歴  : 対象外"
+assert_not_contains "$FAKE_DOCKER_CALLS" "healthcheck-http-probe"
+
+sensitive_healthcheck_output="$TEST_TMP/keep-mode-sensitive-healthcheck.out"
+: > "$FAKE_DOCKER_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="app"
+export FAKE_HEALTHCHECK_SECRET="true"
+if ! printf '1\n3\n\n0\n0\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode logs \
+    --suppress-startup-logs \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$sensitive_healthcheck_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES FAKE_HEALTHCHECK_SECRET
+  cat "$sensitive_healthcheck_output" >&2
+  fail "sensitive healthcheck diagnosis returned a non-zero status"
+fi
+unset FAKE_COMPOSE_PS_SERVICES FAKE_HEALTHCHECK_SECRET
+
+assert_contains "$sensitive_healthcheck_output" "curl -u [REDACTED] -fs http://127.0.0.1:8080/health"
+assert_contains "$sensitive_healthcheck_output" "ホストのプロセス引数への露出を避けて手動再実行と HTTP 補助リクエストをスキップします。"
+assert_not_contains "$sensitive_healthcheck_output" "super-secret"
+assert_not_contains "$FAKE_DOCKER_CALLS" "healthcheck-http-probe"
+
+failed_healthcheck_output="$TEST_TMP/keep-mode-failed-healthcheck.out"
+: > "$FAKE_DOCKER_CALLS"
+export FAKE_COMPOSE_PS_SERVICES="app"
+export FAKE_HEALTHCHECK_STATE_FAIL="true"
+export FAKE_HEALTHCHECK_EXACT_FAIL="true"
+export FAKE_HEALTHCHECK_HTTP_FAIL="true"
+if ! printf '1\n3\n\n0\n0\n' | (
+  cd "$REPO_ROOT"
+  bash ./build_and_verify.sh \
+    --compose-service app \
+    --startup-service app \
+    --keep-container-mode logs \
+    --suppress-startup-logs \
+    --env-list-limit 1 \
+    --directory-tree-depth 1 \
+    --suppress-removed-logs
+) >"$failed_healthcheck_output" 2>&1; then
+  unset FAKE_COMPOSE_PS_SERVICES FAKE_HEALTHCHECK_STATE_FAIL \
+    FAKE_HEALTHCHECK_EXACT_FAIL FAKE_HEALTHCHECK_HTTP_FAIL
+  cat "$failed_healthcheck_output" >&2
+  fail "failed healthcheck diagnosis did not return to the service action menu"
+fi
+unset FAKE_COMPOSE_PS_SERVICES FAKE_HEALTHCHECK_STATE_FAIL \
+  FAKE_HEALTHCHECK_EXACT_FAIL FAKE_HEALTHCHECK_HTTP_FAIL
+
+assert_contains "$failed_healthcheck_output" "現在状態       : unhealthy"
+assert_contains "$failed_healthcheck_output" "連続失敗回数   : 3"
+assert_contains "$failed_healthcheck_output" "終了コード : 22"
+assert_contains "$failed_healthcheck_output" "手動再実行結果 : NG (exit=22)"
+assert_contains "$failed_healthcheck_output" "curl: (7) Failed to connect to 127.0.0.1 port 8080"
+assert_contains "$failed_healthcheck_output" "healthcheck の HTTP 補助リクエストに失敗しました (exit=7)。"
+assert_contains "$failed_healthcheck_output" "Compose サービスの対話操作を終了しました。"
 
 mysql_helper_output="$TEST_TMP/keep-mode-mysql-helper.out"
 : > "$FAKE_DOCKER_CALLS"
 # MySQL 8.0.42 と MySQL 8.4 / Aurora 8.4 互換系を同じ操作経路で確認する。
 export FAKE_COMPOSE_PS_SERVICES="app mysql80 aurora84"
-if ! printf '2\n3\n0\n3\n3\n0\n0\n' | (
+if ! printf '2\n4\n0\n3\n4\n0\n0\n' | (
   cd "$REPO_ROOT"
   bash ./build_and_verify.sh \
     --compose-service app,mysql80,aurora84 \
@@ -544,7 +652,7 @@ if ! printf '2\n3\n0\n3\n3\n0\n0\n' | (
 fi
 unset FAKE_COMPOSE_PS_SERVICES
 
-assert_occurrences "$mysql_helper_output" "  3) MySQL クライアントへ接続 (SQL クエリを対話実行)" 4
+assert_occurrences "$mysql_helper_output" "  4) MySQL クライアントへ接続 (SQL クエリを対話実行)" 4
 assert_contains "$mysql_helper_output" "MySQL クライアントへ接続します (service=mysql80, container=mysql-8.0.42)。"
 assert_contains "$mysql_helper_output" "MySQL クライアントへ接続します (service=aurora84, container=aurora-mysql-8.4)。"
 assert_contains "$mysql_helper_output" "SQL クエリを対話実行できます。終了するには exit または \\q を入力してください。"
@@ -568,7 +676,7 @@ mysql_failure_output="$TEST_TMP/keep-mode-mysql-failure.out"
 : > "$FAKE_DOCKER_CALLS"
 export FAKE_COMPOSE_PS_SERVICES="mysql80"
 export FAKE_MYSQL_CLIENT_FAIL="true"
-if ! printf '1\n3\n0\n0\n' | (
+if ! printf '1\n4\n0\n0\n' | (
   cd "$REPO_ROOT"
   bash ./build_and_verify.sh \
     --compose-service mysql80 \
@@ -596,7 +704,7 @@ cwagent_helper_output="$TEST_TMP/keep-mode-cwagent-helper.out"
 : > "$FAKE_CURL_CALLS"
 export FAKE_COMPOSE_PS_SERVICES="app cwagent cloudwatch-logs-mock"
 export FAKE_CLOUDWATCH_JOURNAL_FILE="$TEST_DIR/fixtures/cloudwatch-wiremock-requests.json"
-if ! printf '2\n3\n\n0\n0\n' | (
+if ! printf '2\n4\n\n0\n0\n' | (
   cd "$REPO_ROOT"
   bash ./build_and_verify.sh \
     --compose-service app,cwagent,cloudwatch-logs-mock \
@@ -613,7 +721,7 @@ if ! printf '2\n3\n\n0\n0\n' | (
 fi
 unset FAKE_COMPOSE_PS_SERVICES FAKE_CLOUDWATCH_JOURNAL_FILE
 
-assert_contains "$cwagent_helper_output" "3) CloudWatch Logs 偽装送達を確認 (ロググループ / ストリーム / イベント)"
+assert_contains "$cwagent_helper_output" "4) CloudWatch Logs 偽装送達を確認 (ロググループ / ストリーム / イベント)"
 assert_contains "$cwagent_helper_output" "CloudWatch Agent → CloudWatch Logs 偽装サービスの送達を確認します。"
 assert_contains "$cwagent_helper_output" "WireMock API 受信総数: CreateLogGroup=2, CreateLogStream=2, PutLogEvents=3"
 assert_contains "$cwagent_helper_output" "[OK] /mnt/logs/app-front*.log"
@@ -636,7 +744,7 @@ otel_helper_output="$TEST_TMP/keep-mode-otel-helper.out"
 export FAKE_COMPOSE_PS_SERVICES="app adot-collector jaeger"
 export FAKE_JAEGER_SERVICES_FILE="$TEST_DIR/fixtures/jaeger-services.json"
 export FAKE_JAEGER_TRACES_FILE="$TEST_DIR/fixtures/jaeger-traces.json"
-if ! printf '2\n3\ninvalid\n1\n\n0\n0\n' | (
+if ! printf '2\n3\n\n4\ninvalid\n1\n\n0\n0\n' | (
   cd "$REPO_ROOT"
   bash ./build_and_verify.sh \
     --compose-service app,adot-collector,jaeger \
@@ -653,7 +761,13 @@ if ! printf '2\n3\ninvalid\n1\n\n0\n0\n' | (
 fi
 unset FAKE_COMPOSE_PS_SERVICES FAKE_JAEGER_SERVICES_FILE FAKE_JAEGER_TRACES_FILE
 
-assert_contains "$otel_helper_output" "3) X-Ray 偽装 Jaeger のトレースを確認 (サービス / トレース / スパン)"
+assert_contains "$otel_helper_output" "4) X-Ray 偽装 Jaeger のトレースを確認 (サービス / トレース / スパン)"
+assert_contains "$otel_helper_output" "[healthcheck 実行ファイル]"
+assert_contains "$otel_helper_output" "ファイル: /healthcheck"
+assert_contains "$otel_helper_output" "実行権限: あり"
+assert_contains "$otel_helper_output" "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  /healthcheck"
+assert_contains "$otel_helper_output" "手動再実行結果 : OK"
+assert_contains "$otel_helper_output" "HTTP(S) URL を含む healthcheck ではないため、HTTP 補助リクエストは対象外です。"
 assert_contains "$otel_helper_output" "OTel Collector ヘルスチェック: OK (service=adot-collector)"
 assert_contains "$otel_helper_output" "TracesExporter resource spans: 2, spans: 4"
 assert_contains "$otel_helper_output" "OTel Collector → X-Ray 偽装 Jaeger のトレース送達を確認します。"
@@ -670,6 +784,7 @@ assert_contains "$otel_helper_output" "http.request.header.authorization=[REDACT
 assert_contains "$otel_helper_output" "SELECT * FROM orders WHERE token=[REDACTED]"
 assert_not_contains "$otel_helper_output" "dummy-secret"
 assert_contains "$FAKE_DOCKER_CALLS" "exec cid-adot-collector /healthcheck"
+assert_contains "$FAKE_DOCKER_CALLS" "healthcheck-file /healthcheck"
 assert_contains "$FAKE_DOCKER_CALLS" "port cid-jaeger 16686/tcp"
 assert_contains "$FAKE_CURL_CALLS" "http://127.0.0.1:16686/api/services"
 assert_contains "$FAKE_CURL_CALLS" "--data-urlencode service=myapp-front"
@@ -681,7 +796,7 @@ otel_no_traces_output="$TEST_TMP/keep-mode-otel-no-traces.out"
 : > "$FAKE_CURL_CALLS"
 export FAKE_COMPOSE_PS_SERVICES="app adot-collector jaeger"
 export FAKE_JAEGER_SERVICES_BODY='{"data":[]}'
-if ! printf '2\n3\n\n0\n0\n' | (
+if ! printf '2\n4\n\n0\n0\n' | (
   cd "$REPO_ROOT"
   bash ./build_and_verify.sh \
     --compose-service app,adot-collector,jaeger \

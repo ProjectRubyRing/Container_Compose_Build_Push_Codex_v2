@@ -15,7 +15,7 @@
 **同時に起動した Compose サービスのログ表示**、**コンテナ内ディレクトリツリーの表示**、
 **デプロイ済み Web アプリケーションの各ルート表示**、**全量テキストレポートの保存**、
 起動状態を維持した検証対象コンテナへの **bash 直接接続 / 対話式 HTTP 通信**と、
-**起動中 Compose サービスを選択したログ閲覧・bash・MySQL 操作**、および
+**起動中 Compose サービスを選択したログ閲覧・bash・healthcheck・MySQL 操作**、および
 **cwagent / OTel のローカル送達診断**を任意で行えます。
 `build_and_push.sh --build-only` はこのスクリプトへ委譲されます
 (後述の「ビルドのみの実行 / 起動・URL 確認」を参照)。
@@ -69,7 +69,7 @@
 | `--dry-run` | 実際のビルド/ログイン/タグ付け/プッシュ/ファイル出力は行わず、実行内容のプレビューのみ表示する | `false` |
 | `--cleanup-all-docker-data` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。処理終了時に確認ダイアログを表示し、承認後、現在の Docker context の全コンテナ・全イメージ・全ローカルボリューム・未使用ネットワーク・現在の daemon で削除可能な全ビルドキャッシュを削除する | `false` |
 | `--startup-log-lines N\|all` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。検証対象のコンテナ起動ログ、同時に起動した他 Compose サービスのログ、`--keep-container-mode logs` で選択したログについて、サービスごとの画面表示行数を指定する。`N` は末尾 `N` 行、`all` は全行を表示する | `50` |
-| `--keep-container-mode bash\|http\|logs` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。JBoss EAP の起動確認後もコンテナを残し、検証対象へ `/bin/bash` で直接接続するか、対話式 HTTP 通信、起動中 Compose サービスを選択したログ閲覧・bash・MySQL 操作を行う。`logs` では cwagent / CloudWatch Logs モックおよび OTel / Jaeger の送達診断も選択できる。`--verify-startup` と `--keep-container` を暗黙に有効化する | (なし) |
+| `--keep-container-mode bash\|http\|logs` | **`build_and_verify.sh` / `--build-only` 委譲時のみ**。JBoss EAP の起動確認後もコンテナを残し、検証対象へ `/bin/bash` で直接接続するか、対話式 HTTP 通信、起動中 Compose サービスを選択したログ閲覧・bash・healthcheck・MySQL 操作を行う。`logs` では cwagent / CloudWatch Logs モックおよび OTel / Jaeger の送達診断も選択できる。`--verify-startup` と `--keep-container` を暗黙に有効化する | (なし) |
 | `--jboss-context-root ROOT` | 対話式 HTTP モードの JBoss EAP コンテキストルートを明示する。未指定時は起動ログから検出する | (自動検出、検出不能時は `/`) |
 | `--jboss-http-port PORT` | 対話式 HTTP モードのコンテナ側 HTTP リスナーポートを明示する。Docker の公開ポートがあれば接続先へ自動変換する | (自動検出、検出不能時は `8080`) |
 | `--log-dir DIR` | コンソールに出力されるログを `DIR` 配下のログファイルにも保存する。画面表示は従来どおり継続し、ログ末尾には処理実行時間 (経過秒数) も記録される。`DIR` が無ければ自動作成する。ファイル名は compose 版が `build_and_push_<YYYYMMDDHHMMSS>.log`、buildx 版が `buildx_build_and_push_<YYYYMMDDHHMMSS>.log`。compose 版で `--build-only` 委譲時も、委譲先 (`build_and_verify.sh`) の出力を含めて記録する | (なし。指定時のみログファイル出力) |
@@ -375,7 +375,7 @@ Compose v2 では `--parallel <指定サービス数>`、Compose v1 では
     --startup-service app --startup-service batch
 ```
 
-EAP 8.1の起動ログ解析、同時起動サービスログ、対話操作、ディレクトリツリー集計、
+EAP 8.1の起動ログ解析、同時起動サービスログ、対話操作、healthcheck 診断、ディレクトリツリー集計、
 CloudWatch Logs偽装送達レポート、Jaegerトレースレポートは、Docker / curlのモックと
 WireMock / JaegerのJSONフィクスチャを使う回帰テストで確認できます。
 
@@ -399,7 +399,8 @@ bash tests/build_and_verify_test.sh
   HTTP ステータスコードとレスポンスボディ全体を区切り付きで表示します。
 - `logs`: 現在起動している Compose サービスを番号付きで表示します。サービス選択後、
   `1` で今回の起動以降のログ表示、`2` で対象コンテナの対話式 `/bin/bash` 接続を
-  選べます。bash セッション内では `cd` で移動しながら任意のコマンドを実行でき、
+  選べます。`3` では Docker healthcheck の設定・実行履歴・通信内容を確認できます。
+  bash セッション内では `cd` で移動しながら任意のコマンドを実行でき、
   bash 終了後は同じサービスの操作選択へ戻ります。同一サービスに複数コンテナがある場合は
   警告を表示して先頭の実行中コンテナへ接続します。ログ表示後も Enter キーで操作選択へ
   戻ります。操作選択の `0` で最新のサービス一覧へ戻り、サービス選択の `0` で終了します。
@@ -407,8 +408,25 @@ bash tests/build_and_verify_test.sh
   ログは `--suppress-startup-logs` の指定中でも表示します。bash 操作を行う対象イメージには
   `/bin/bash` が必要です。
 
+healthcheck 診断では、Docker に反映された `Config.Healthcheck` の形式、コマンド、interval、
+timeout、retries、start period と、`State.Health` の現在状態、連続失敗回数、Docker が保持する
+直近の実行開始・終了時刻、終了コード、stdout/stderr を表示します。続けて同じコマンドを
+選択時点でコンテナ内から一度だけ手動再実行し、その終了コードと出力を表示します。手動再実行は
+診断専用で、Docker の health 状態や実行履歴自体は更新しません。ホストで `timeout` を利用できる場合、
+手動再実行には `--url-timeout` の時間上限（既定 60 秒）を適用します。healthcheck 未設定のサービスでも
+項目 `3` は表示され、未設定であることを明示します。
+
+`CMD ["/healthcheck"]` のように絶対パスの実行ファイルが指定されている場合は、そのファイルの
+存在、権限、SHA-256 も確認します。単純な `curl` / `wget` の HTTP(S) healthcheck では、同じ
+コンテナのネットワーク名前空間から補助 GET/HEAD リクエストを送り、リクエスト URL、終了コード、
+レスポンスヘッダー／本文と接続メトリクスを最大 32768 bytes 表示します。ヘッダーやボディを伴う
+複雑なコマンドは HTTP 補助リクエストを自動生成せず、元のコマンドの手動再実行結果だけを表示します。
+認証指定や認証情報を含む URL を検出した場合は、ホストのプロセス引数への露出を避けるため手動再実行も
+スキップし、Docker の実行履歴だけを表示します。表示内容にはアプリケーション情報が含まれ得るため、
+画面出力とログファイルの取り扱いには注意してください。
+
 `logs` モードで選択した実行中コンテナに `mysql` クライアントと `mysqld` がある場合、
-`MySQL クライアントへ接続` が次の操作番号（通常は `3`）として追加されます。選択すると
+`MySQL クライアントへ接続` が次の操作番号（通常は `4`）として追加されます。選択すると
 コンテナ内の Unix socket 経由で対話式 `mysql` クライアントが直ちに開き、SQL クエリを
 実行できます。`exit` または `\q` で終了すると、同じ Compose サービスの操作選択へ戻ります。
 この方式はサービス名やイメージタグに依存せず、MySQL 8.0.42 と
@@ -422,8 +440,8 @@ MySQL 8.4 / Aurora 8.4 互換系で共通です。
 `mysql` へ渡し、セッション終了時に削除します。
 
 さらに、対象のComposeサービス名に応じて次の可観測性専用操作が追加されます。MySQL 操作と
-同時に利用可能な場合も番号は重複せず、専用操作を使わない通常サービスでは従来どおり
-`0`から`2`だけが表示されます。この診断は
+同時に利用可能な場合も番号は重複せず、専用操作を使わない通常サービスでは
+`0`から`3`が表示されます。この診断は
 [ProjectRubyRing/Container_Compose_file](https://github.com/ProjectRubyRing/Container_Compose_file)
 のローカル可観測性構成（cwagent + WireMock、ADOT Collector + Jaeger）に合わせています。
 

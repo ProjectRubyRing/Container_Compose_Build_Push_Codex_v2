@@ -26,7 +26,8 @@
 #   (7) --keep-container-mode: 起動確認後もコンテナを残し、検証対象へ直接
 #                          bash 接続するか、対話式の HTTP リクエスト、または
 #                          起動中 Compose サービスのログ閲覧・bash / MySQL 接続、
-#                          および cwagent / OTel のローカル送達診断を実行する。
+#                          healthcheck 設定・実行履歴・HTTP 通信、および
+#                          cwagent / OTel のローカル送達診断を実行する。
 #
 # --verify-startup / --verify-url いずれも指定しなければ、純粋にビルドのみを
 # 行って終了する (従来の build_and_push.sh --build-only 相当)。
@@ -115,7 +116,7 @@ URL_METHOD="GET"                  # HTTP メソッド
 URL_CONTENT_TYPE=""               # Content-Type ヘッダ値 (未指定時は curl 既定)
 URL_BODY_JSON=""                  # JSON 文字列をリクエストボディとして送る
 URL_BODY_FORM=""                  # form 文字列 (key=value&...) をリクエストボディとして送る
-URL_TIMEOUT="60"                  # URL が期待応答を返すまで待つ最大秒数 (リトライ)
+URL_TIMEOUT="60"                  # URL 応答待機と HTTP / healthcheck 診断の最大秒数
 URL_INTERVAL="3"                  # URL 呼び出しリトライ間隔 (秒)
 URL_INSECURE="false"             # true: TLS 証明書検証を無効化して呼び出す (curl -k)
 
@@ -130,6 +131,7 @@ INTERACTION_CONTAINER_PORT=""
 INTERACTION_HTTP_HOST=""
 INTERACTION_HTTP_PORT=""
 INTERACTIVE_HTTP_BODY_FILE=""
+HEALTHCHECK_DIAGNOSTIC_FILE=""
 HTTP_REQUEST_METHOD=""
 HTTP_REQUEST_PATH=""
 HTTP_REQUEST_BODY=""
@@ -320,7 +322,8 @@ JBoss マスターパスワード (BuildKit シークレット):
                              bash  docker exec で /bin/bash へ直接接続する
                              http  JBoss EAP へ対話式の HTTP リクエストを送る
                               logs  起動中 Compose サービスを番号で選択後、
-                                    ログ表示または対話式 bash 接続を繰り返す。
+                                    ログ表示、対話式 bash 接続、healthcheck の
+                                    設定・実行履歴・通信確認を繰り返す。
                                     MySQL サーバーでは SQL の対話実行も選択できる。
                                     cwagent / cloudwatch-logs-mock では CloudWatch
                                     Logs 偽装送達、otel / adot-collector / jaeger
@@ -371,7 +374,8 @@ URL 応答確認:
   --url-body-form DATA     verify-url 時のリクエストボディに form データ
                            (key=value&...) を設定する。Content-Type 未指定時は
                            application/x-www-form-urlencoded を自動設定する。
-  --url-timeout SEC        期待する応答を得るまで待つ最大秒数・リトライ。
+  --url-timeout SEC        期待する応答を得るまで待つ最大秒数・リトライ、および
+                           HTTP / healthcheck 診断の 1 回あたりの最大秒数。
                            対話式 http モードでは 1 リクエストの最大秒数 (既定: 60)
   --url-interval SEC       URL 呼び出しのリトライ間隔・秒 (既定: 3)
   --url-insecure           TLS 証明書検証を無効化して呼び出す (curl -k)
@@ -2362,6 +2366,441 @@ show_interactive_compose_service_logs() {
   show_startup_logs "$logs" "サービス: ${service_name}" "false" "Compose サービスログ"
 }
 
+# healthcheck の設定・履歴・応答には URL や認証関連パラメータが含まれ得るため、
+# 画面や build_and_push.sh のログへ残す前に、明示的な機微値だけを伏せ字にする。
+redact_healthcheck_text() {
+  LC_ALL=C sed -E \
+    -e 's#(https?://)[^/@[:space:]]+:[^/@[:space:]]+@#\1[REDACTED]@#g' \
+    -e 's#([?&](password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)=)[^&[:space:]]*#\1[REDACTED]#Ig' \
+    -e 's#((password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)[[:space:]]*=[[:space:]]*")[^"]*#\1[REDACTED]#Ig' \
+    -e 's#((password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)[[:space:]]*=[[:space:]]*)[^[:space:];]+#\1[REDACTED]#Ig' \
+    -e 's#((authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key|x-auth-token)[[:space:]]*:[[:space:]]*).*#\1[REDACTED]#Ig' \
+    -e 's#((password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)"?[[:space:]]*:[[:space:]]*")[^"]*#\1[REDACTED]#Ig' \
+    -e 's#((password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)"?[[:space:]]*:[[:space:]]*"?)[^",}[:space:]]+#\1[REDACTED]#Ig' \
+    -e 's#(^|[[:space:]])(--(password|passwd|secret|token|authorization|cookie|api[_-]?key|credential))([=[:space:]]+)[^[:space:]]+#\1\2\4[REDACTED]#Ig' \
+    -e 's#(^|[[:space:]])(-u|--user)([=[:space:]]*)[^[:space:]]+#\1\2\3[REDACTED]#g' \
+    -e 's#(^|[[:space:]])-p[^$[:space:]][^[:space:]]*#\1-p[REDACTED]#g'
+}
+
+# healthcheck の手動再実行や HTTP 補助プローブの出力を、端末を圧迫しない範囲で表示する。
+print_healthcheck_capture() {
+  local capture_file="$1" empty_message="$2"
+  local byte_count display_limit=32768
+
+  if [ ! -s "$capture_file" ]; then
+    diag "$empty_message"
+    return 0
+  fi
+  byte_count="$(wc -c < "$capture_file" | tr -d '[:space:]')"
+  case "$byte_count" in
+    ''|*[!0-9]*) byte_count=0 ;;
+  esac
+  if [ "$byte_count" -gt "$display_limit" ]; then
+    head -c "$display_limit" "$capture_file" | redact_healthcheck_text >&2
+    printf '\n' >&2
+    diag "... healthcheck 診断出力を ${display_limit}/${byte_count} bytes で省略しました。"
+  else
+    redact_healthcheck_text < "$capture_file" >&2
+    printf '\n' >&2
+  fi
+}
+
+# CMD 形式で直接指定された /healthcheck 等について、実際に呼ばれるファイルの
+# 存在・実行権限・内容識別用 SHA-256 をコンテナ内で確認する。
+show_healthcheck_executable_file() {
+  local container_id="$1" executable_path="$2" file_info file_status=0
+
+  case "$executable_path" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+
+  file_info="$(
+    docker exec "$container_id" /bin/sh -c '
+      target=$1
+      if [ ! -e "$target" ]; then
+        printf "ファイル: %s (存在しません)\n" "$target"
+        exit 66
+      fi
+      printf "ファイル: %s\n" "$target"
+      ls -ld -- "$target" 2>/dev/null || ls -ld "$target"
+      if [ -x "$target" ]; then
+        printf "実行権限: あり\n"
+      else
+        printf "実行権限: なし\n"
+      fi
+      if [ -f "$target" ] && command -v sha256sum >/dev/null 2>&1; then
+        sha256sum -- "$target" 2>/dev/null || sha256sum "$target"
+      elif [ -f "$target" ] && command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$target"
+      else
+        printf "SHA-256: 算出ツールなし、または通常ファイルではないため未取得\n"
+      fi
+    ' healthcheck-file "$executable_path" 2>&1
+  )" || file_status=$?
+
+  diag ""
+  diag "[healthcheck 実行ファイル]"
+  printf '%s\n' "$file_info" | redact_healthcheck_text >&2
+  if [ "$file_status" -ne 0 ]; then
+    warn "healthcheck 実行ファイルを完全には確認できませんでした (exit=${file_status})。"
+  fi
+}
+
+# 単純な curl / wget の HTTP healthcheck について、元のチェックとは別のボディなし
+# 補助リクエストを同じコンテナのネットワーク名前空間から送り、ヘッダー・本文・
+# 接続メトリクスを表示する。認証ヘッダーやリクエストボディを伴う複雑な設定は扱わない。
+run_healthcheck_http_probe() {
+  local container_id="$1" probe_kind="$2" request_method="$3" request_url="$4"
+  local probe_status=0 probe_script
+
+  if ! HEALTHCHECK_DIAGNOSTIC_FILE="$(mktemp 2>/dev/null)"; then
+    warn "healthcheck HTTP 通信の保存用一時ファイルを作成できませんでした。"
+    return 1
+  fi
+  : > "$HEALTHCHECK_DIAGNOSTIC_FILE"
+
+  case "$probe_kind" in
+    curl)
+      probe_script="$(cat <<'HEALTHCHECK_CURL_PROBE'
+set -u
+health_url=$1
+health_timeout=$2
+health_method=$3
+if ! command -v curl >/dev/null 2>&1; then
+  printf "curl がコンテナ内にありません。\n" >&2
+  exit 127
+fi
+set -- \
+  --silent \
+  --show-error \
+  --verbose \
+  --include \
+  --max-time "$health_timeout" \
+  --max-filesize 1048576 \
+  --write-out '
+[通信メトリクス]
+http_status=%{http_code}
+remote=%{remote_ip}:%{remote_port}
+local=%{local_ip}:%{local_port}
+time_connect=%{time_connect}s
+time_starttransfer=%{time_starttransfer}s
+time_total=%{time_total}s
+size_download=%{size_download} bytes
+'
+if [ "$health_method" = "HEAD" ]; then
+  set -- "$@" --head
+fi
+exec curl "$@" "$health_url"
+HEALTHCHECK_CURL_PROBE
+)"
+      docker exec "$container_id" /bin/sh -c "$probe_script" \
+        healthcheck-http-probe "$request_url" "$URL_TIMEOUT" "$request_method" \
+        >"$HEALTHCHECK_DIAGNOSTIC_FILE" 2>&1 || probe_status=$?
+      ;;
+    wget)
+      probe_script="$(cat <<'HEALTHCHECK_WGET_PROBE'
+set -u
+health_url=$1
+health_timeout=$2
+if ! command -v wget >/dev/null 2>&1; then
+  printf "wget がコンテナ内にありません。\n" >&2
+  exit 127
+fi
+exec wget -S -O - -T "$health_timeout" "$health_url"
+HEALTHCHECK_WGET_PROBE
+)"
+      docker exec "$container_id" /bin/sh -c "$probe_script" \
+        healthcheck-http-probe "$request_url" "$URL_TIMEOUT" \
+        >"$HEALTHCHECK_DIAGNOSTIC_FILE" 2>&1 || probe_status=$?
+      ;;
+    *)
+      rm -f -- "$HEALTHCHECK_DIAGNOSTIC_FILE"
+      HEALTHCHECK_DIAGNOSTIC_FILE=""
+      return 1
+      ;;
+  esac
+
+  diag ""
+  diag "[HTTP healthcheck 通信詳細（補助リクエスト）]"
+  diag "送信元     : 選択したコンテナのネットワーク名前空間"
+  printf 'リクエスト : [%s] %s\n' "$request_method" "$request_url" \
+    | redact_healthcheck_text >&2
+  diag "追加ヘッダー/ボディ: なし（通信詳細取得用の補助リクエスト）"
+  diag "終了コード : ${probe_status}"
+  diag "レスポンス : ヘッダー、本文、または接続エラー（最大 32768 bytes）"
+  diag "───────────────────────────────────────────────────────────────────"
+  print_healthcheck_capture "$HEALTHCHECK_DIAGNOSTIC_FILE" \
+    "(レスポンス本文・ヘッダー・接続エラー出力はありません)"
+  rm -f -- "$HEALTHCHECK_DIAGNOSTIC_FILE"
+  HEALTHCHECK_DIAGNOSTIC_FILE=""
+  if [ "$probe_status" -ne 0 ]; then
+    warn "healthcheck の HTTP 補助リクエストに失敗しました (exit=${probe_status})。"
+  fi
+  return 0
+}
+
+# healthcheck コマンドから安全に再送できる単純な HTTP(S) URL を抽出し、
+# curl / wget の補助プローブへ振り分ける。
+run_healthcheck_http_details() {
+  local container_id="$1" health_command_text="$2"
+  local http_url probe_kind="" request_method="GET"
+
+  http_url="$(
+    printf '%s\n' "$health_command_text" \
+      | grep -Eo "https?://[^[:space:]\"'<>|;&)]+" \
+      | head -n 1 || true
+  )"
+  if [ -z "$http_url" ]; then
+    diag ""
+    diag "[通信・リクエスト・レスポンス]"
+    diag "HTTP(S) URL を含む healthcheck ではないため、HTTP 補助リクエストは対象外です。"
+    diag "通信成否とコマンド出力は、Docker 実行履歴および手動再実行結果を確認してください。"
+    return 0
+  fi
+  if printf '%s\n' "$http_url" \
+      | grep -qiE '://[^/@[:space:]]+:[^/@[:space:]]+@|[?&](password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)='; then
+    warn "healthcheck URL に認証情報らしき値が含まれるため、コマンドライン露出を避けて HTTP 補助リクエストをスキップします。"
+    return 0
+  fi
+  case "$http_url" in
+    *'$'*|*'`'*)
+      warn "healthcheck URL にシェル展開が必要なため、HTTP 補助リクエストをスキップします: ${http_url}"
+      return 0
+      ;;
+  esac
+
+  if printf '%s\n' "$health_command_text" \
+      | grep -Eq '(^|[[:space:];|&()])curl([[:space:]]|$)'; then
+    probe_kind="curl"
+    if printf ' %s ' "$health_command_text" \
+        | grep -Eq '(^|[[:space:]])(-X|--request|-d|--data[^[:space:]]*|-H|--header|-u|--user)([=[:space:]]|$)'; then
+      warn "healthcheck にメソッド・ヘッダー・ボディ・認証の指定があるため、安全な HTTP 補助リクエストを自動生成できません。"
+      diag "正確な実行結果は上の手動再実行結果を確認してください。"
+      return 0
+    fi
+    if printf ' %s ' "$health_command_text" \
+        | grep -Eq '(^|[[:space:]])(-I|--head)([[:space:]]|$)'; then
+      request_method="HEAD"
+    fi
+  elif printf '%s\n' "$health_command_text" \
+      | grep -Eq '(^|[[:space:];|&()])wget([[:space:]]|$)'; then
+    probe_kind="wget"
+  else
+    diag ""
+    diag "[通信・リクエスト・レスポンス]"
+    diag "HTTP(S) URL は検出しましたが、curl / wget 以外のため補助リクエストは実行しません。"
+    diag "正確な実行結果は上の手動再実行結果を確認してください。"
+    return 0
+  fi
+
+  run_healthcheck_http_probe "$container_id" "$probe_kind" "$request_method" "$http_url" || true
+  diag "注意: 補助リクエストは単純な GET/HEAD の通信詳細取得用で、Docker の health 状態・履歴を更新しません。"
+  return 0
+}
+
+# 選択された Compose サービスの Docker healthcheck を診断する。
+# Docker が実際に実行した直近履歴と、現在時点での同一コマンド手動再実行を分けて表示する。
+run_interactive_compose_healthcheck() {
+  local service_name="$1" container_id container_name health_test_text health_mode
+  local health_config health_state health_status health_failing_streak health_history
+  local health_state_loaded="true" health_history_loaded="true"
+  local retained_count=0 health_command_text="" health_command_display=""
+  local executable_path="" exact_started_at exact_finished_at exact_started_epoch exact_finished_epoch
+  local exact_timeout_label exact_status=0
+  local -a container_ids=() health_test=() exact_runner=()
+
+  mapfile -t container_ids < <(compose_container_ids "$service_name")
+  if [ ${#container_ids[@]} -eq 0 ]; then
+    err "Compose サービス '${service_name}' の実行中コンテナが見つかりません。"
+    return 1
+  fi
+  container_id="${container_ids[0]}"
+  container_name="$(normalize_container_name "$(docker inspect -f '{{.Name}}' "$container_id" 2>/dev/null || printf '%s' "$container_id")")"
+  if [ ${#container_ids[@]} -gt 1 ]; then
+    warn "Compose サービス '${service_name}' は複数コンテナで実行中のため、先頭のコンテナを使用します: ${container_name}"
+  fi
+
+  if ! health_test_text="$(
+    docker inspect -f \
+      '{{if .Config.Healthcheck}}{{range .Config.Healthcheck.Test}}{{println .}}{{end}}{{end}}' \
+      "$container_id"
+  )"; then
+    err "コンテナの healthcheck 設定を取得できませんでした: ${container_name}"
+    return 1
+  fi
+  if [ -n "$health_test_text" ]; then
+    mapfile -t health_test <<< "$health_test_text"
+  fi
+  health_mode="${health_test[0]:-}"
+
+  diag ""
+  diag "════════════════ Docker healthcheck 診断 ════════════════"
+  diag "Compose サービス : ${service_name}"
+  diag "コンテナ         : ${container_name}"
+  if [ -z "$health_mode" ] || [ "$health_mode" = "NONE" ]; then
+    diag "設定             : healthcheck は設定されていません。"
+    diag "Docker 実行履歴  : 対象外"
+    diag "════════════════════════════════════════════════════════"
+    return 0
+  fi
+
+  case "$health_mode" in
+    CMD-SHELL)
+      health_command_text="${health_test[1]:-}"
+      if [ ${#health_test[@]} -gt 2 ]; then
+        health_command_text+=$'\n'
+        health_command_text+="$(printf '%s\n' "${health_test[@]:2}")"
+      fi
+      health_command_display="$health_command_text"
+      executable_path="${health_command_text%%[[:space:]]*}"
+      executable_path="${executable_path#\"}"
+      executable_path="${executable_path%\"}"
+      executable_path="${executable_path#\'}"
+      executable_path="${executable_path%\'}"
+      ;;
+    CMD)
+      printf -v health_command_text '%q ' "${health_test[@]:1}"
+      health_command_text="${health_command_text% }"
+      health_command_display="$health_command_text"
+      executable_path="${health_test[1]:-}"
+      ;;
+    *)
+      warn "未対応の healthcheck 形式です: ${health_mode}"
+      diag "設定値:"
+      printf '%s\n' "$health_test_text" | redact_healthcheck_text >&2
+      diag "════════════════════════════════════════════════════════"
+      return 0
+      ;;
+  esac
+
+  if ! health_config="$(
+    docker inspect -f \
+      '{{if .Config.Healthcheck}}interval={{.Config.Healthcheck.Interval}}{{"\n"}}timeout={{.Config.Healthcheck.Timeout}}{{"\n"}}retries={{.Config.Healthcheck.Retries}}{{"\n"}}start_period={{.Config.Healthcheck.StartPeriod}}{{end}}' \
+      "$container_id"
+  )"; then
+    health_config="(取得失敗)"
+  fi
+  if ! health_state="$(
+    docker inspect -f \
+      '{{if .State.Health}}{{.State.Health.Status}}|{{.State.Health.FailingStreak}}{{end}}' \
+      "$container_id" 2>/dev/null
+  )"; then
+    health_state=""
+    health_state_loaded="false"
+  fi
+  if ! health_history="$(
+    docker inspect -f \
+      '{{if .State.Health}}{{range .State.Health.Log}}開始: {{.Start}}{{"\n"}}終了: {{.End}}{{"\n"}}終了コード: {{.ExitCode}}{{"\n"}}出力:{{"\n"}}{{.Output}}{{"\n"}}────────────────────{{"\n"}}{{end}}{{end}}' \
+      "$container_id" 2>/dev/null
+  )"; then
+    health_history=""
+    health_history_loaded="false"
+  fi
+
+  diag ""
+  diag "[設定（Docker に反映された Config.Healthcheck）]"
+  diag "形式:"
+  diag "  ${health_mode}"
+  diag "コマンド:"
+  printf '%s\n' "$health_command_display" | redact_healthcheck_text >&2
+  printf '%s\n' "$health_config" | sed 's/^/  /' >&2
+
+  diag ""
+  diag "[Docker が実際に実行した healthcheck]"
+  if [ "$health_state_loaded" != "true" ]; then
+    diag "現在状態       : Docker inspect に失敗したため未取得"
+    diag "連続失敗回数   : 未取得"
+  elif [ -n "$health_state" ]; then
+    health_status="${health_state%%|*}"
+    health_failing_streak="${health_state#*|}"
+    diag "現在状態       : ${health_status}"
+    diag "連続失敗回数   : ${health_failing_streak}"
+  else
+    diag "現在状態       : Docker の health 状態はまだ生成されていません。"
+    diag "連続失敗回数   : 未取得"
+  fi
+  if [ "$health_history_loaded" != "true" ]; then
+    diag "保持された履歴 : Docker inspect に失敗したため未取得"
+  elif [ -n "$health_history" ]; then
+    retained_count="$(printf '%s\n' "$health_history" | grep -c '^開始: ' || true)"
+    diag "保持された履歴 : ${retained_count} 件"
+    diag "───────────────────────────────────────────────────────────────────"
+    printf '%s\n' "$health_history" | redact_healthcheck_text >&2
+  else
+    diag "保持された履歴 : 0 件（まだ未実行、または Docker が履歴を保持していません）"
+  fi
+
+  case "$executable_path" in
+    /*) show_healthcheck_executable_file "$container_id" "$executable_path" ;;
+  esac
+
+  if printf '%s\n' "$health_command_text" \
+      | grep -qiE '://[^/@[:space:]]+:[^/@[:space:]]+@|[?&](password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)=|(^|[[:space:];])(password|passwd|pwd|secret|token|authorization|cookie|api[_-]?key|credential)[[:space:]]*=|(^|[[:space:]])(-u[^[:space:]]*:[^[:space:]]+|(-u|--user)(=|[[:space:]])+[^[:space:]]*:[^[:space:]]+)|(^|[[:space:]])--(password|passwd|secret|token|authorization|cookie|api[_-]?key|credential)([=[:space:]]|$)|(^|[[:space:]])-p[^$[:space:]]|(authorization|proxy-authorization|cookie|x-api-key|api-key|x-auth-token)[[:space:]]*:'; then
+    warn "healthcheck コマンドに認証情報らしき指定があるため、ホストのプロセス引数への露出を避けて手動再実行と HTTP 補助リクエストをスキップします。"
+    diag "Docker が実際に実行した結果は、上の State.Health と実行履歴を確認してください。"
+    diag "════════════════════════════════════════════════════════"
+    return 0
+  fi
+
+  if [ ${#health_test[@]} -lt 2 ] || [ -z "$health_command_text" ]; then
+    warn "healthcheck の実行コマンドが空のため、手動再実行をスキップします。"
+    diag "════════════════════════════════════════════════════════"
+    return 0
+  fi
+  if ! HEALTHCHECK_DIAGNOSTIC_FILE="$(mktemp 2>/dev/null)"; then
+    warn "healthcheck 手動再実行の保存用一時ファイルを作成できませんでした。"
+    diag "════════════════════════════════════════════════════════"
+    return 0
+  fi
+  : > "$HEALTHCHECK_DIAGNOSTIC_FILE"
+  if command -v timeout >/dev/null 2>&1; then
+    exact_runner=(timeout "${URL_TIMEOUT}s")
+    exact_timeout_label="${URL_TIMEOUT} 秒 (--url-timeout)"
+  else
+    exact_timeout_label="未適用 (timeout コマンドなし)"
+    warn "ホストに timeout コマンドがないため、healthcheck 手動再実行へ時間上限を適用できません。"
+  fi
+  exact_started_at="$(date '+%Y-%m-%d %H:%M:%S')"
+  exact_started_epoch="$(date +%s)"
+  case "$health_mode" in
+    CMD-SHELL)
+      "${exact_runner[@]}" docker exec "$container_id" /bin/sh -c "$health_command_text" \
+        >"$HEALTHCHECK_DIAGNOSTIC_FILE" 2>&1 || exact_status=$?
+      ;;
+    CMD)
+      "${exact_runner[@]}" docker exec "$container_id" "${health_test[@]:1}" \
+        >"$HEALTHCHECK_DIAGNOSTIC_FILE" 2>&1 || exact_status=$?
+      ;;
+  esac
+  exact_finished_epoch="$(date +%s)"
+  exact_finished_at="$(date '+%Y-%m-%d %H:%M:%S')"
+
+  diag ""
+  diag "[現在時点の healthcheck コマンド手動再実行]"
+  diag "注意: この手動再実行は Docker の health 状態・履歴を更新しません。"
+  diag "開始       : ${exact_started_at}"
+  diag "終了       : ${exact_finished_at}"
+  diag "実行上限   : ${exact_timeout_label}"
+  diag "所要時間   : $(( exact_finished_epoch - exact_started_epoch )) 秒"
+  diag "終了コード : ${exact_status}"
+  diag "stdout/stderr（最大 32768 bytes）:"
+  diag "───────────────────────────────────────────────────────────────────"
+  print_healthcheck_capture "$HEALTHCHECK_DIAGNOSTIC_FILE" \
+    "(stdout/stderr 出力なし。終了コードで成否を確認してください)"
+  rm -f -- "$HEALTHCHECK_DIAGNOSTIC_FILE"
+  HEALTHCHECK_DIAGNOSTIC_FILE=""
+  if [ "$exact_status" -eq 0 ]; then
+    diag "手動再実行結果 : OK"
+  else
+    diag "手動再実行結果 : NG (exit=${exact_status})"
+  fi
+
+  run_healthcheck_http_details "$container_id" "$health_command_text"
+  diag "════════════════════════════════════════════════════════"
+  return 0
+}
+
 # 選択された Compose サービスの実行中コンテナへ対話式 bash で接続する。
 # 同じシェルセッションが続くため、cd で移動しながら任意のコマンドを実行できる。
 run_interactive_compose_bash() {
@@ -3272,7 +3711,7 @@ run_otel_jaeger_trace_helper() {
 }
 
 # 選択済み Compose サービスについて、ログ表示、対話式 bash / MySQL 接続、
-# 対応サービスのローカル可観測性診断を繰り返す。
+# healthcheck 診断、対応サービスのローカル可観測性診断を繰り返す。
 # 0 を選択すると、起動中 Compose サービスの選択へ戻る。
 compose_service_observability_helper_kind() {
   case "$1" in
@@ -3291,7 +3730,7 @@ pause_compose_service_actions() {
 }
 
 run_interactive_compose_service_actions() {
-  local service_name="$1" action helper_kind="" max_action=2
+  local service_name="$1" action helper_kind="" max_action=3
   local mysql_action=0 observability_action=0
 
   helper_kind="$(compose_service_observability_helper_kind "$service_name" || true)"
@@ -3308,6 +3747,7 @@ run_interactive_compose_service_actions() {
     diag "Compose サービス '${service_name}' で実行する操作を選択してください:"
     diag "  1) ログを表示"
     diag "  2) bash へ接続 (cd・任意コマンドを実行可能)"
+    diag "  3) healthcheck 設定・実行履歴・通信を確認"
     if [ "$mysql_action" -gt 0 ]; then
       diag "  ${mysql_action}) MySQL クライアントへ接続 (SQL クエリを対話実行)"
     fi
@@ -3337,6 +3777,12 @@ run_interactive_compose_service_actions() {
         if ! run_interactive_compose_bash "$service_name"; then
           warn "bash 接続に失敗しました。サービス操作の選択へ戻ります。"
         fi
+        ;;
+      3)
+        if ! run_interactive_compose_healthcheck "$service_name"; then
+          warn "healthcheck 診断に失敗しました。サービス操作の選択へ戻ります。"
+        fi
+        pause_compose_service_actions || return 1
         ;;
       0)
         log "Compose サービス '${service_name}' の操作を終了し、サービス選択へ戻ります。"
@@ -3431,7 +3877,7 @@ run_keep_container_interaction() {
         log "[DRY-RUN] JBoss EAP のコンテキストルートと HTTP ポートを解決し、パス・GET/POST・POST ボディ形式の対話入力後に curl を実行します。"
         ;;
       logs)
-        log "[DRY-RUN] 起動中の Compose サービスを番号で選択し、ログ表示、対話式 bash / MySQL 接続、cwagent / OTel のローカル送達診断を繰り返し実行します。"
+        log "[DRY-RUN] 起動中の Compose サービスを番号で選択し、ログ表示、対話式 bash / MySQL 接続、healthcheck 設定・実行履歴・通信確認、cwagent / OTel のローカル送達診断を繰り返し実行します。"
         ;;
     esac
     return 0
@@ -3938,6 +4384,7 @@ cleanup_all() {
   cleanup_copied_files
   [ -n "$URL_BODY_FILE" ] && rm -f "$URL_BODY_FILE"
   [ -n "$INTERACTIVE_HTTP_BODY_FILE" ] && rm -f "$INTERACTIVE_HTTP_BODY_FILE"
+  [ -n "$HEALTHCHECK_DIAGNOSTIC_FILE" ] && rm -f "$HEALTHCHECK_DIAGNOSTIC_FILE"
 
   # 本処理が既に失敗している場合は元の終了コードを優先する。
   if [ "$original_status" -ne 0 ]; then

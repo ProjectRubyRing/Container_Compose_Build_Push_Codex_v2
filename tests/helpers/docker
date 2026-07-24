@@ -76,6 +76,7 @@ if [ "${1:-}" = "compose" ]; then
           jaeger) printf 'cid-jaeger\n' ;;
           mysql80) printf 'cid-mysql80\n' ;;
           aurora84) printf 'cid-mysql84\n' ;;
+          nohealth) printf 'cid-nohealth\n' ;;
           *) printf 'cid-app\n' ;;
         esac
       fi
@@ -231,6 +232,47 @@ fi
 
 if [ "${1:-}" = "inspect" ]; then
   case "$*" in
+    *".Config.Healthcheck.Test"*)
+      case "$*" in
+        *"cid-nohealth"*) ;;
+        *"cid-adot-collector"*) printf 'CMD\n/healthcheck\n' ;;
+        *)
+          printf 'CMD-SHELL\n'
+          if [ "${FAKE_HEALTHCHECK_SECRET:-false}" = "true" ]; then
+            printf 'curl -u admin:super-secret -fs http://127.0.0.1:8080/health >/dev/null || exit 1\n'
+          else
+            printf 'curl -fs http://127.0.0.1:8080/health >/dev/null || exit 1\n'
+          fi
+          ;;
+      esac
+      ;;
+    *".Config.Healthcheck.Interval"*)
+      printf 'interval=30s\n'
+      printf 'timeout=5s\n'
+      printf 'retries=3\n'
+      printf 'start_period=2m0s\n'
+      ;;
+    *".State.Health.Status"*)
+      if [ "${FAKE_HEALTHCHECK_STATE_FAIL:-false}" = "true" ]; then
+        printf 'unhealthy|3\n'
+      else
+        printf 'healthy|0\n'
+      fi
+      ;;
+    *".State.Health.Log"*)
+      printf '開始: 2026-07-24T01:00:00.000000000Z\n'
+      printf '終了: 2026-07-24T01:00:00.050000000Z\n'
+      printf '終了コード: 0\n'
+      printf '出力:\n'
+      printf 'healthcheck request completed\n'
+      printf '────────────────────\n'
+      printf '開始: 2026-07-24T01:00:30.000000000Z\n'
+      printf '終了: 2026-07-24T01:00:30.040000000Z\n'
+      printf '終了コード: 0\n'
+      printf '出力:\n'
+      printf 'healthcheck request completed\n'
+      printf '────────────────────\n'
+      ;;
     *".State.Running"*)
       printf 'true\n'
       ;;
@@ -245,6 +287,7 @@ if [ "${1:-}" = "inspect" ]; then
         *"cid-jaeger"*) printf '/jaeger\n' ;;
         *"cid-mysql80"*) printf '/mysql-8.0.42\n' ;;
         *"cid-mysql84"*) printf '/aurora-mysql-8.4\n' ;;
+        *"cid-nohealth"*) printf '/no-healthcheck\n' ;;
         *) printf '/test-app-1\n' ;;
       esac
       ;;
@@ -261,6 +304,44 @@ if [ "${1:-}" = "inspect" ]; then
       fail "$@"
       ;;
   esac
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ] && [ "${6:-}" = "healthcheck-http-probe" ]; then
+  if [ "${FAKE_HEALTHCHECK_HTTP_FAIL:-false}" = "true" ]; then
+    printf 'curl: (7) Failed to connect to 127.0.0.1 port 8080\n' >&2
+    exit 7
+  fi
+  printf 'HTTP/1.1 200 OK\r\n'
+  printf 'Content-Type: application/json\r\n'
+  printf 'Set-Cookie: session=response-cookie-secret; HttpOnly\r\n'
+  printf 'Content-Length: 47\r\n\r\n'
+  printf '{"status":"UP","token":"response-token-secret"}\n'
+  printf '\n[通信メトリクス]\n'
+  printf 'http_status=200\n'
+  printf 'remote=127.0.0.1:8080\n'
+  printf 'local=127.0.0.1:41000\n'
+  printf 'time_connect=0.001s\n'
+  printf 'time_starttransfer=0.002s\n'
+  printf 'time_total=0.003s\n'
+  printf 'size_download=15 bytes\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ] && [ "${6:-}" = "healthcheck-file" ]; then
+  printf 'ファイル: %s\n' "${7:-/healthcheck}"
+  printf '%s\n' '-rwxr-xr-x 1 root root 12345 Jul 24 00:00 /healthcheck'
+  printf '実行権限: あり\n'
+  printf '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  /healthcheck\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "exec" ] && [ "${2:-}" = "cid-app" ] \
+    && [ "${3:-}" = "/bin/sh" ] && [ "${4:-}" = "-c" ] \
+    && [[ "${5:-}" == *"curl -fs http://127.0.0.1:8080/health"* ]]; then
+  if [ "${FAKE_HEALTHCHECK_EXACT_FAIL:-false}" = "true" ]; then
+    exit 22
+  fi
   exit 0
 fi
 
